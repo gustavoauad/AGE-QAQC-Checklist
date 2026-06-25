@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { supabase } from "../supabase";
 import { useIsMobile } from "../useIsMobile";
 import AgeLogo from "./AgeLogo";
+import NotificationBell from "./NotificationBell";
 import CreateProjectModal from "./CreateProjectModal";
 import ProjectSetupModal from "./ProjectSetupModal";
 
@@ -11,7 +12,7 @@ const roleColors = {
   drafter: { bg: "#3a1a3a", color: "#c084fc", label: "Drafter" },
 };
 
-export default function ProjectsDashboard({ session, onSelectProject, onSignOut, onShowDashboard }) {
+export default function ProjectsDashboard({ session, onSelectProject, onSignOut, onShowDashboard, onGoToProjects }) {
   const isMobile = useIsMobile();
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -23,6 +24,16 @@ export default function ProjectsDashboard({ session, onSelectProject, onSignOut,
   useEffect(() => {
     fetchProfile();
     fetchProjects();
+
+    // Real-time: reload when added to a new project (e.g. via QR invite)
+    const ch = supabase
+      .channel(`pm-projects-${session.user.id}`)
+      .on("postgres_changes", {
+        event: "INSERT", schema: "public", table: "project_members",
+        filter: `user_id=eq.${session.user.id}`,
+      }, () => fetchProjects())
+      .subscribe();
+    return () => supabase.removeChannel(ch);
   }, []);
 
   const fetchProfile = async () => {
@@ -75,6 +86,7 @@ export default function ProjectsDashboard({ session, onSelectProject, onSignOut,
               {profile?.full_name || session.user.email}
             </span>
           )}
+          <NotificationBell userId={session.user.id} onGoToProjects={onGoToProjects} />
           <button onClick={onSignOut} style={{
             padding: isMobile ? "6px 10px" : "8px 16px",
             background: "#ef4444", color: "white", border: "none",

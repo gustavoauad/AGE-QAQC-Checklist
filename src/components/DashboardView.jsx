@@ -2,11 +2,12 @@ import { useState, useEffect } from "react";
 import { supabase } from "../supabase";
 import { CATEGORIES } from "../checklistTemplate";
 import { useIsMobile } from "../useIsMobile";
+import NotificationBell from "./NotificationBell";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
 
-export default function DashboardView({ session, onBack, onSignOut }) {
+export default function DashboardView({ session, onBack, onSignOut, onGoToProjects }) {
   const isMobile = useIsMobile();
   const [projects, setProjects] = useState([]);
   const [stats, setStats] = useState({});
@@ -114,6 +115,7 @@ export default function DashboardView({ session, onBack, onSignOut }) {
           </button>
           <h1 style={{ margin: 0, fontSize: isMobile ? "15px" : "18px", fontWeight: "700", color: "#f1f5f9" }}>Dashboard</h1>
         </div>
+        <NotificationBell userId={session.user.id} onGoToProjects={onGoToProjects} />
         <button onClick={onSignOut} style={{ padding: isMobile ? "6px 10px" : "8px 16px", background: "#ef4444", color: "white", border: "none", borderRadius: "6px", cursor: "pointer", fontSize: isMobile ? "13px" : "14px" }}>
           {isMobile ? "↩" : "Sign Out"}
         </button>

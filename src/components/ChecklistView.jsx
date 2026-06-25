@@ -3,8 +3,9 @@ import { supabase } from "../supabase";
 import { CATEGORIES } from "../checklistTemplate";
 import { useIsMobile } from "../useIsMobile";
 import AgeLogo from "./AgeLogo";
+import NotificationBell from "./NotificationBell";
 
-export default function ChecklistView({ project, userRole, session, onBack, onSignOut }) {
+export default function ChecklistView({ project, userRole, session, onBack, onSignOut, onGoToProjects }) {
   const isMobile = useIsMobile();
   const [checklists, setChecklists] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -23,6 +24,22 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const [milestoneLoading, setMilestoneLoading] = useState(false);
 
   useEffect(() => { fetchAll(); }, []);
+
+  // Real-time: update checklist items as other users make changes
+  useEffect(() => {
+    const ch = supabase
+      .channel(`checklist-${project.id}`)
+      .on("postgres_changes", {
+        event: "UPDATE", schema: "public", table: "checklists",
+        filter: `project_id=eq.${project.id}`,
+      }, (payload) => {
+        setChecklists((prev) =>
+          prev.map((c) => c.id === payload.new.id ? { ...c, ...payload.new } : c)
+        );
+      })
+      .subscribe();
+    return () => supabase.removeChannel(ch);
+  }, [project.id]);
 
   const fetchAll = async () => {
     setLoading(true);
@@ -392,6 +409,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                 Role: <strong style={{ color: "#f1f5f9" }}>{userRole.replace("_", " ")}</strong>
               </span>
             )}
+            <NotificationBell userId={session.user.id} onGoToProjects={onGoToProjects} />
             <button onClick={onSignOut} style={{ padding: "6px 12px", background: "#ef4444", color: "white", border: "none", borderRadius: "6px", cursor: "pointer", fontSize: "13px" }}>
               {isMobile ? "↩" : "Sign Out"}
             </button>

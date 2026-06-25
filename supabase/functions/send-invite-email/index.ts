@@ -30,7 +30,7 @@ serve(async (req) => {
       method: "POST",
       headers: { "Authorization": `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        from: "AG&E QC Checklist <noreply@age-qc.com>",
+        from: "AG&E QC Checklist <onboarding@resend.dev>",
         to: [to],
         subject: `You've been added to "${projectName}" on AG&E QC Checklist`,
         html,
