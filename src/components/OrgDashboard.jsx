@@ -12,6 +12,7 @@ export default function OrgDashboard({ session, org }) {
   const [stats, setStats] = useState({});
   const [categoryStats, setCategoryStats] = useState({});
   const [milestones, setMilestones] = useState([]);
+  const [milestoneChartData, setMilestoneChartData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
 
@@ -50,6 +51,7 @@ export default function OrgDashboard({ session, org }) {
     setCategoryStats(catMap);
 
     const today = new Date().toISOString().split("T")[0];
+    // Upcoming milestones panel
     const { data: ms } = await supabase
       .from("project_milestones")
       .select("*, project:projects(name)")
@@ -58,6 +60,66 @@ export default function OrgDashboard({ session, org }) {
       .order("date")
       .limit(10);
     setMilestones(ms || []);
+
+    // Active milestone completion chart
+    const { data: allMs } = await supabase
+      .from("project_milestones")
+      .select("id, project_id, name, date")
+      .in("project_id", ids)
+      .order("project_id").order("date");
+
+    // Find active milestone per project
+    const msByProject = {};
+    (allMs || []).forEach((m) => {
+      if (!msByProject[m.project_id]) msByProject[m.project_id] = [];
+      msByProject[m.project_id].push(m);
+    });
+    const activeMsIds = [];
+    const activeMsInfo = {}; // msId → { name, projectName }
+    projs.forEach((p) => {
+      const pMs = msByProject[p.id] || [];
+      for (let i = 0; i < pMs.length; i++) {
+        const prevDate = i > 0 ? pMs[i - 1].date : "0000-01-01";
+        if (today > prevDate && today <= pMs[i].date) {
+          activeMsIds.push(pMs[i].id);
+          activeMsInfo[pMs[i].id] = { name: pMs[i].name, projectName: p.name };
+          break;
+        }
+      }
+    });
+
+    if (activeMsIds.length > 0) {
+      const { data: miRows } = await supabase
+        .from("milestone_items")
+        .select("milestone_id, checklist_item_id")
+        .in("milestone_id", activeMsIds);
+      const itemToMs = {};
+      (miRows || []).forEach(({ milestone_id, checklist_item_id }) => {
+        itemToMs[checklist_item_id] = milestone_id;
+      });
+      const allItemIds = Object.keys(itemToMs);
+      let statusMap = {};
+      if (allItemIds.length > 0) {
+        const { data: clRows } = await supabase
+          .from("checklists").select("id, status").in("id", allItemIds);
+        (clRows || []).forEach((r) => { statusMap[r.id] = r.status; });
+      }
+      const msStats = {};
+      activeMsIds.forEach((id) => { msStats[id] = { total: 0, complete: 0 }; });
+      Object.entries(itemToMs).forEach(([itemId, msId]) => {
+        if (!msStats[msId]) return;
+        msStats[msId].total++;
+        if (statusMap[itemId] === "complete") msStats[msId].complete++;
+      });
+      setMilestoneChartData(activeMsIds.map((id) => ({
+        name: `${activeMsInfo[id].projectName} — ${activeMsInfo[id].name}`,
+        Complete: msStats[id].complete,
+        Remaining: msStats[id].total - msStats[id].complete,
+        total: msStats[id].total,
+        pct: msStats[id].total ? Math.round((msStats[id].complete / msStats[id].total) * 100) : 0,
+      })).filter((d) => d.total > 0));
+    }
+
     setLoading(false);
   };
 
@@ -65,16 +127,17 @@ export default function OrgDashboard({ session, org }) {
     (acc, p) => { const s = stats[p.id] || {}; acc.total += s.total || 0; acc.complete += s.complete || 0; acc.na += s.na || 0; acc.pending += s.pending || 0; return acc; },
     { total: 0, complete: 0, na: 0, pending: 0 }
   );
-  const overallPct = overall.total ? Math.round(((overall.complete + overall.na) / overall.total) * 100) : 0;
+  // Progress = complete / applicable (total − na)
+  const overallApplicable = overall.total - overall.na;
+  const overallPct = overallApplicable ? Math.round((overall.complete / overallApplicable) * 100) : 0;
 
   const chartData = projects.map((p) => {
     const s = stats[p.id] || {};
-    const total = s.total || 1;
+    const applicable = (s.total || 0) - (s.na || 0) || 1;
     return {
       name: p.name.length > 22 ? p.name.slice(0, 20) + "…" : p.name,
-      Complete: Math.round(((s.complete || 0) / total) * 100),
-      "N/A": Math.round(((s.na || 0) / total) * 100),
-      Pending: Math.round(((s.pending || 0) / total) * 100),
+      Complete: Math.round(((s.complete || 0) / applicable) * 100),
+      Pending: Math.round(((s.pending || 0) / applicable) * 100),
     };
   });
 
@@ -102,7 +165,7 @@ export default function OrgDashboard({ session, org }) {
             {[
               { label: "Projects", value: projects.length, color: "#0095da" },
               { label: "Overall Progress", value: `${overallPct}%`, color: overallPct === 100 ? "#7ecb7b" : "#f1f5f9" },
-              { label: "Done / N/A", value: overall.complete + overall.na, color: "#7ecb7b" },
+              { label: "Done", value: overall.complete, color: "#7ecb7b" },
               { label: "Pending", value: overall.pending, color: overall.pending === 0 ? "#7ecb7b" : "#f59e0b" },
             ].map((stat) => (
               <div key={stat.label} style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: "12px", padding: isMobile ? "14px" : "20px" }}>
@@ -123,11 +186,30 @@ export default function OrgDashboard({ session, org }) {
                 <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: "8px", color: "#f1f5f9" }} formatter={(v) => `${v}%`} />
                 <Legend wrapperStyle={{ color: "#94a3b8", fontSize: "12px" }} />
                 <Bar dataKey="Complete" stackId="a" fill="#4da447" />
-                <Bar dataKey="N/A" stackId="a" fill="#78716c" />
                 <Bar dataKey="Pending" stackId="a" fill="#334155" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
+
+          {/* Active milestone completion chart */}
+          {milestoneChartData.length > 0 && (
+            <div style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: "12px", padding: isMobile ? "16px" : "24px", marginBottom: "24px" }}>
+              <h3 style={{ color: "#f1f5f9", margin: "0 0 4px", fontSize: "15px", fontWeight: "600" }}>Active Milestone Progress</h3>
+              <p style={{ color: "#64748b", fontSize: "12px", margin: "0 0 16px" }}>Completed items assigned to each project's current active milestone</p>
+              <ResponsiveContainer width="100%" height={Math.max(120, milestoneChartData.length * (isMobile ? 44 : 52))}>
+                <BarChart data={milestoneChartData} layout="vertical" margin={{ left: isMobile ? 0 : 10, right: 60, top: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
+                  <XAxis type="number" tick={{ fill: "#94a3b8", fontSize: isMobile ? 10 : 12 }} />
+                  <YAxis type="category" dataKey="name" tick={{ fill: "#94a3b8", fontSize: isMobile ? 9 : 11 }} width={isMobile ? 110 : 200} />
+                  <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: "8px", color: "#f1f5f9" }}
+                    formatter={(val, key, props) => [`${val} items (${props.payload.pct}%)`, key]} />
+                  <Legend wrapperStyle={{ color: "#94a3b8", fontSize: "12px" }} />
+                  <Bar dataKey="Complete" stackId="a" fill="#4da447" />
+                  <Bar dataKey="Remaining" stackId="a" fill="#334155" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
 
           {/* Upcoming milestones */}
           {milestones.length > 0 && (
@@ -160,7 +242,8 @@ export default function OrgDashboard({ session, org }) {
             {projects.map((p) => {
               const s = stats[p.id] || {};
               const total = s.total || 0;
-              const pct = total ? Math.round(((s.complete + s.na) / total) * 100) : 0;
+              const applicable = total - (s.na || 0);
+              const pct = applicable ? Math.round((s.complete / applicable) * 100) : 0;
               const isExp = expanded === p.id;
               const catSt = categoryStats[p.id] || {};
               return (
@@ -168,7 +251,7 @@ export default function OrgDashboard({ session, org }) {
                   <div onClick={() => setExpanded(isExp ? null : p.id)} style={{ padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
                     <div>
                       <h4 style={{ color: "#f1f5f9", margin: "0 0 4px", fontSize: "15px" }}>{p.name}</h4>
-                      <p style={{ color: "#94a3b8", margin: 0, fontSize: "12px" }}>{s.complete || 0} done · {s.na || 0} N/A · {s.pending || 0} pending</p>
+                      <p style={{ color: "#94a3b8", margin: 0, fontSize: "12px" }}>{s.complete || 0} done · {s.pending || 0} pending · {s.na || 0} N/A</p>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                       <span style={{ color: pct === 100 ? "#7ecb7b" : "#f1f5f9", fontSize: "22px", fontWeight: "700" }}>{pct}%</span>

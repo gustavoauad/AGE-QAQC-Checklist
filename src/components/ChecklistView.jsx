@@ -24,6 +24,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const [milestoneLoading, setMilestoneLoading] = useState(false);
   const [filterStatus, setFilterStatus] = useState("all"); // all | pending | complete | na
   const [filterMilestoneId, setFilterMilestoneId] = useState("all");
+  const [filterApplicable, setFilterApplicable] = useState(false);
 
   useEffect(() => { fetchAll(); }, []);
 
@@ -243,6 +244,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const filterMilestoneSet = filterMilestoneId !== "all" ? (milestoneItemsCache[filterMilestoneId] || null) : null;
 
   const applyFilters = (items) => items.filter((item) => {
+    if (filterApplicable && (item.status || "pending") === "na") return false;
     if (filterStatus !== "all" && (item.status || "pending") !== filterStatus) return false;
     if (filterMilestoneSet && !filterMilestoneSet.has(item.id)) return false;
     return true;
@@ -557,6 +559,16 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           <div style={{ width: "1px", height: "16px", background: "#334155", margin: "0 4px" }} />
         </>)}
 
+        {/* Applicable filter */}
+        <button onClick={() => setFilterApplicable((v) => !v)} style={{
+          padding: isMobile ? "4px 10px" : "4px 12px", borderRadius: "20px", border: "1px solid",
+          fontSize: "12px", fontWeight: "600", cursor: "pointer",
+          background: filterApplicable ? "#29439b" : "transparent",
+          borderColor: filterApplicable ? "#4da8da" : "#334155",
+          color: filterApplicable ? "#c7d7ff" : "#64748b",
+        }}>Applicable</button>
+        <div style={{ width: "1px", height: "16px", background: "#334155", margin: "0 4px" }} />
+
         {/* Status filter */}
         {[
           { id: "all", label: "All Status" },
@@ -576,8 +588,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         ))}
 
         {/* Clear filters */}
-        {(filterMilestoneId !== "all" || filterStatus !== "all") && (
-          <button onClick={() => { setFilterMilestoneId("all"); setFilterStatus("all"); }} style={{
+        {(filterMilestoneId !== "all" || filterStatus !== "all" || filterApplicable) && (
+          <button onClick={() => { setFilterMilestoneId("all"); setFilterStatus("all"); setFilterApplicable(false); }} style={{
             padding: "4px 10px", borderRadius: "20px", border: "1px solid #ef4444",
             fontSize: "11px", fontWeight: "600", cursor: "pointer",
             background: "transparent", color: "#ef4444", marginLeft: "4px",
