@@ -258,10 +258,11 @@ function ChecklistsTab({ org, orgRole }) {
   const [orgProjects, setOrgProjects] = useState([]);
   const [pushProjectId, setPushProjectId] = useState("");
   const [pushStatus, setPushStatus] = useState("idle"); // idle|checking|conflict|pushing|done
+  const [pushError, setPushError] = useState("");
 
   const openPushModal = async (cat) => {
     setPushModal({ catId: cat.id, catLabel: getLabel(cat) });
-    setPushStatus("idle"); setPushProjectId("");
+    setPushStatus("idle"); setPushProjectId(""); setPushError("");
     if (!orgProjects.length) {
       const { data } = await supabase.from("projects")
         .select("id, name").eq("organization_id", org.id).is("archived_at", null).order("name");
@@ -270,44 +271,24 @@ function ChecklistsTab({ org, orgRole }) {
   };
 
   const executePush = async (action) => {
-    setPushStatus("pushing");
+    setPushStatus("pushing"); setPushError("");
     const { catId, catLabel } = pushModal;
-    // Ensure items are loaded
     const catItems = items[catId] !== undefined ? items[catId] : await initCategory(catId);
+    const ts = Date.now().toString(36);
+    const newCatId = `${catId.slice(0, 8)}_copy_${ts}`;
+    const newCatLabel = `${catLabel} (Copy)`;
 
-    if (action === "overwrite") {
-      await supabase.from("checklists").delete().eq("project_id", pushProjectId).eq("category", catId);
-      if (catItems.length) {
-        await supabase.from("checklists").insert(
-          catItems.map((item) => ({
-            project_id: pushProjectId, item_id: item.item_id, category: catId,
-            item_text: item.item_text, sort_order: item.sort_order, status: "pending",
-          }))
-        );
-      }
-      await supabase.from("project_checklist_config").upsert(
-        { project_id: pushProjectId, category: catId, enabled: true, label: catLabel },
-        { onConflict: "project_id,category" }
-      );
-    } else if (action === "new") {
-      const ts = Date.now().toString(36);
-      const newCatId = `${catId.slice(0, 8)}_copy_${ts}`;
-      const newLabel = `${catLabel} (Copy)`;
-      if (catItems.length) {
-        await supabase.from("checklists").insert(
-          catItems.map((item) => ({
-            project_id: pushProjectId,
-            item_id: `${newCatId}_${item.item_id.slice(-8)}`,
-            category: newCatId, item_text: item.item_text,
-            sort_order: item.sort_order, status: "pending", is_custom: true,
-          }))
-        );
-      }
-      await supabase.from("project_checklist_config").upsert(
-        { project_id: pushProjectId, category: newCatId, enabled: true, label: newLabel },
-        { onConflict: "project_id,category" }
-      );
-    }
+    const { error } = await supabase.rpc("push_checklist_to_project", {
+      p_project_id:    pushProjectId,
+      p_category:      catId,
+      p_label:         catLabel,
+      p_items:         catItems.map((i) => ({ item_id: i.item_id, item_text: i.item_text, sort_order: i.sort_order })),
+      p_action:        action,
+      p_new_cat_id:    action === "new" ? newCatId : null,
+      p_new_cat_label: action === "new" ? newCatLabel : null,
+    });
+
+    if (error) { setPushError(error.message); setPushStatus("conflict"); return; }
     setPushStatus("done");
   };
 
@@ -319,7 +300,7 @@ function ChecklistsTab({ org, orgRole }) {
     if (existing?.length) {
       setPushStatus("conflict");
     } else {
-      await executePush("overwrite");
+      await executePush("overwrite_reset");
     }
   };
 
@@ -670,31 +651,46 @@ function ChecklistsTab({ org, orgRole }) {
               </div>
             ) : pushStatus === "conflict" ? (
               <div>
+                {pushError && (
+                  <div style={{ background: "#450a0a", border: "1px solid #ef4444", borderRadius: "8px", padding: "10px 12px", marginBottom: "14px", color: "#fca5a5", fontSize: "13px" }}>
+                    {pushError}
+                  </div>
+                )}
                 <div style={{ background: "#451a03", border: "1px solid #f59e0b", borderRadius: "8px", padding: "12px", marginBottom: "16px" }}>
                   <p style={{ color: "#fcd34d", margin: 0, fontSize: "13px" }}>
-                    ⚠ This project already has items in the <strong>{pushModal.catLabel}</strong> checklist. Choose how to proceed:
+                    ⚠ This project already has items in <strong>{pushModal?.catLabel}</strong>. Choose how to proceed:
                   </p>
                 </div>
                 <div style={{ display: "grid", gap: "8px" }}>
-                  <button onClick={() => executePush("overwrite")} disabled={pushStatus === "pushing"} style={{
+                  <button onClick={() => executePush("overwrite_keep")} style={{
+                    padding: "12px 16px", background: "#0f2a1a", border: "1px solid #4da447", color: "#7ecb7b",
+                    borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600", textAlign: "left", fontFamily: "Manrope, sans-serif",
+                  }}>
+                    ✓ Overwrite &amp; keep statuses — update item text, preserve pending/complete/N/A
+                  </button>
+                  <button onClick={() => executePush("overwrite_reset")} style={{
                     padding: "12px 16px", background: "#450a0a", border: "1px solid #ef4444", color: "#fca5a5",
                     borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600", textAlign: "left", fontFamily: "Manrope, sans-serif",
                   }}>
-                    ⚠ Overwrite — replace all existing items with org defaults
+                    ↺ Overwrite &amp; reset — replace all items, reset everything to pending
                   </button>
-                  <button onClick={() => executePush("new")} disabled={pushStatus === "pushing"} style={{
+                  <button onClick={() => executePush("new")} style={{
                     padding: "12px 16px", background: "#012d5a", border: "1px solid #0095da", color: "#33bdef",
                     borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600", textAlign: "left", fontFamily: "Manrope, sans-serif",
                   }}>
                     + Add as New — create a copy alongside the existing checklist
                   </button>
-                  <button onClick={() => setPushStatus("idle")} style={{
+                  <button onClick={() => { setPushStatus("idle"); setPushError(""); }} style={{
                     padding: "10px", background: "transparent", border: "1px solid #334155", color: "#94a3b8",
                     borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontFamily: "Manrope, sans-serif",
                   }}>
                     Cancel
                   </button>
                 </div>
+              </div>
+            ) : pushStatus === "pushing" ? (
+              <div style={{ textAlign: "center", padding: "20px 0" }}>
+                <p style={{ color: "#94a3b8", fontSize: "14px", margin: 0 }}>Pushing checklist...</p>
               </div>
             ) : (
               <div>
