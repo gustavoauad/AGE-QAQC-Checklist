@@ -256,13 +256,14 @@ function ChecklistsTab({ org, orgRole }) {
   // ── Push to project ─────────────────────────────────────────────────────────
   const [pushModal, setPushModal] = useState(null); // { catId, catLabel }
   const [orgProjects, setOrgProjects] = useState([]);
-  const [pushProjectId, setPushProjectId] = useState("");
+  const [selectedProjIds, setSelectedProjIds] = useState(new Set());
   const [pushStatus, setPushStatus] = useState("idle"); // idle|checking|conflict|pushing|done
   const [pushError, setPushError] = useState("");
+  const [conflictNames, setConflictNames] = useState([]);
 
   const openPushModal = async (cat) => {
     setPushModal({ catId: cat.id, catLabel: getLabel(cat) });
-    setPushStatus("idle"); setPushProjectId(""); setPushError("");
+    setPushStatus("idle"); setSelectedProjIds(new Set()); setPushError(""); setConflictNames([]);
     if (!orgProjects.length) {
       const { data } = await supabase.from("projects")
         .select("id, name").eq("organization_id", org.id).is("archived_at", null).order("name");
@@ -270,22 +271,31 @@ function ChecklistsTab({ org, orgRole }) {
     }
   };
 
+  const toggleProject = (id) => setSelectedProjIds((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const toggleAll = () => {
+    if (selectedProjIds.size === orgProjects.length) {
+      setSelectedProjIds(new Set());
+    } else {
+      setSelectedProjIds(new Set(orgProjects.map((p) => p.id)));
+    }
+  };
+
   const executePush = async (action) => {
     setPushStatus("pushing"); setPushError("");
     const { catId, catLabel } = pushModal;
     const catItems = items[catId] !== undefined ? items[catId] : await initCategory(catId);
-    const ts = Date.now().toString(36);
-    const newCatId = `${catId.slice(0, 8)}_copy_${ts}`;
-    const newCatLabel = `${catLabel} (Copy)`;
 
-    const { error } = await supabase.rpc("push_checklist_to_project", {
-      p_project_id:    pushProjectId,
-      p_category:      catId,
-      p_label:         catLabel,
-      p_items:         catItems.map((i) => ({ item_id: i.item_id, item_text: i.item_text })),
-      p_action:        action,
-      p_new_cat_id:    action === "new" ? newCatId : null,
-      p_new_cat_label: action === "new" ? newCatLabel : null,
+    const { error } = await supabase.rpc("push_checklist_to_projects", {
+      p_project_ids: [...selectedProjIds],
+      p_category:    catId,
+      p_label:       catLabel,
+      p_items:       catItems.map((i) => ({ item_id: i.item_id, item_text: i.item_text })),
+      p_action:      action,
     });
 
     if (error) { setPushError(error.message); setPushStatus("conflict"); return; }
@@ -293,11 +303,14 @@ function ChecklistsTab({ org, orgRole }) {
   };
 
   const checkAndPush = async () => {
-    if (!pushProjectId) return;
+    if (selectedProjIds.size === 0) return;
     setPushStatus("checking");
+    const ids = [...selectedProjIds];
     const { data: existing } = await supabase.from("checklists")
-      .select("id").eq("project_id", pushProjectId).eq("category", pushModal.catId).limit(1);
-    if (existing?.length) {
+      .select("project_id").in("project_id", ids).eq("category", pushModal.catId).limit(ids.length);
+    const conflictIds = new Set((existing || []).map((r) => r.project_id));
+    if (conflictIds.size > 0) {
+      setConflictNames(orgProjects.filter((p) => conflictIds.has(p.id)).map((p) => p.name));
       setPushStatus("conflict");
     } else {
       await executePush("overwrite_reset");
@@ -646,73 +659,97 @@ function ChecklistsTab({ org, orgRole }) {
 
             {pushStatus === "done" ? (
               <div style={{ textAlign: "center" }}>
-                <p style={{ color: "#7ecb7b", fontSize: "15px", marginBottom: "20px" }}>✓ Checklist pushed successfully!</p>
+                <p style={{ color: "#7ecb7b", fontSize: "15px", marginBottom: "20px" }}>
+                  ✓ Checklist pushed to {selectedProjIds.size} project{selectedProjIds.size !== 1 ? "s" : ""}!
+                </p>
                 <button onClick={() => setPushModal(null)} style={{ padding: "10px 28px", background: "#334155", color: "#f1f5f9", border: "none", borderRadius: "8px", cursor: "pointer", fontFamily: "Manrope, sans-serif" }}>Close</button>
               </div>
+
             ) : pushStatus === "conflict" ? (
               <div>
                 {pushError && (
-                  <div style={{ background: "#450a0a", border: "1px solid #ef4444", borderRadius: "8px", padding: "10px 12px", marginBottom: "14px", color: "#fca5a5", fontSize: "13px" }}>
-                    {pushError}
-                  </div>
+                  <div style={{ background: "#450a0a", border: "1px solid #ef4444", borderRadius: "8px", padding: "10px 12px", marginBottom: "14px", color: "#fca5a5", fontSize: "13px" }}>{pushError}</div>
                 )}
                 <div style={{ background: "#451a03", border: "1px solid #f59e0b", borderRadius: "8px", padding: "12px", marginBottom: "16px" }}>
-                  <p style={{ color: "#fcd34d", margin: 0, fontSize: "13px" }}>
-                    ⚠ This project already has items in <strong>{pushModal?.catLabel}</strong>. Choose how to proceed:
+                  <p style={{ color: "#fcd34d", margin: "0 0 6px", fontSize: "13px", fontWeight: "600" }}>
+                    ⚠ {conflictNames.length} project{conflictNames.length !== 1 ? "s" : ""} already {conflictNames.length !== 1 ? "have" : "has"} this checklist:
                   </p>
+                  <p style={{ color: "#fbbf24", margin: 0, fontSize: "12px" }}>{conflictNames.join(", ")}</p>
                 </div>
+                <p style={{ color: "#94a3b8", fontSize: "13px", margin: "0 0 12px" }}>How should existing items be handled?</p>
                 <div style={{ display: "grid", gap: "8px" }}>
                   <button onClick={() => executePush("overwrite_keep")} style={{
                     padding: "12px 16px", background: "#0f2a1a", border: "1px solid #4da447", color: "#7ecb7b",
                     borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600", textAlign: "left", fontFamily: "Manrope, sans-serif",
                   }}>
-                    ✓ Overwrite &amp; keep statuses — update item text, preserve pending/complete/N/A
+                    ✓ Keep statuses — update item text, preserve pending / complete / N/A
                   </button>
                   <button onClick={() => executePush("overwrite_reset")} style={{
                     padding: "12px 16px", background: "#450a0a", border: "1px solid #ef4444", color: "#fca5a5",
                     borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600", textAlign: "left", fontFamily: "Manrope, sans-serif",
                   }}>
-                    ↺ Overwrite &amp; reset — replace all items, reset everything to pending
+                    ↺ Reset all — replace items and reset everything to pending
                   </button>
-                  <button onClick={() => executePush("new")} style={{
-                    padding: "12px 16px", background: "#012d5a", border: "1px solid #0095da", color: "#33bdef",
-                    borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600", textAlign: "left", fontFamily: "Manrope, sans-serif",
-                  }}>
-                    + Add as New — create a copy alongside the existing checklist
-                  </button>
-                  <button onClick={() => { setPushStatus("idle"); setPushError(""); }} style={{
+                  <button onClick={() => { setPushStatus("idle"); setPushError(""); setConflictNames([]); }} style={{
                     padding: "10px", background: "transparent", border: "1px solid #334155", color: "#94a3b8",
                     borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontFamily: "Manrope, sans-serif",
                   }}>
-                    Cancel
+                    Back
                   </button>
                 </div>
               </div>
-            ) : pushStatus === "pushing" ? (
-              <div style={{ textAlign: "center", padding: "20px 0" }}>
-                <p style={{ color: "#94a3b8", fontSize: "14px", margin: 0 }}>Pushing checklist...</p>
+
+            ) : pushStatus === "pushing" || pushStatus === "checking" ? (
+              <div style={{ textAlign: "center", padding: "24px 0" }}>
+                <p style={{ color: "#94a3b8", fontSize: "14px", margin: 0 }}>
+                  {pushStatus === "checking" ? "Checking projects..." : "Pushing checklist..."}
+                </p>
               </div>
+
             ) : (
               <div>
-                <label style={{ display: "block", color: "#94a3b8", fontSize: "13px", marginBottom: "6px" }}>Select Project</label>
-                <select value={pushProjectId} onChange={(e) => setPushProjectId(e.target.value)} style={{
-                  width: "100%", padding: "10px 12px", background: "#0f172a", border: "1px solid #334155",
-                  borderRadius: "8px", color: "#f1f5f9", fontSize: "14px", marginBottom: "20px",
-                  boxSizing: "border-box", fontFamily: "Manrope, sans-serif",
-                }}>
-                  <option value="">— choose a project —</option>
-                  {orgProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-                <div style={{ display: "flex", gap: "8px" }}>
-                  <button onClick={() => setPushModal(null)} style={{ flex: 1, padding: "10px", background: "#334155", color: "#f1f5f9", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "14px", fontFamily: "Manrope, sans-serif" }}>
-                    Cancel
-                  </button>
-                  <button onClick={checkAndPush} disabled={!pushProjectId || pushStatus === "checking"} style={{
-                    flex: 1, padding: "10px", background: pushProjectId ? "#0095da" : "#1e293b",
-                    color: pushProjectId ? "white" : "#475569", border: "none", borderRadius: "8px",
-                    cursor: pushProjectId ? "pointer" : "not-allowed", fontSize: "14px", fontWeight: "600", fontFamily: "Manrope, sans-serif",
+                {/* Select All */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                  <label style={{ color: "#94a3b8", fontSize: "13px" }}>Select projects to push to:</label>
+                  <button onClick={toggleAll} style={{
+                    background: "transparent", border: "none", color: "#0095da",
+                    cursor: "pointer", fontSize: "12px", fontWeight: "600", fontFamily: "Manrope, sans-serif",
                   }}>
-                    {pushStatus === "checking" ? "Checking..." : "Push"}
+                    {selectedProjIds.size === orgProjects.length && orgProjects.length > 0 ? "Deselect All" : "Select All"}
+                  </button>
+                </div>
+
+                {/* Project list */}
+                <div style={{ maxHeight: "260px", overflowY: "auto", display: "grid", gap: "6px", marginBottom: "20px" }}>
+                  {orgProjects.length === 0 ? (
+                    <p style={{ color: "#64748b", fontSize: "13px", margin: 0 }}>No active projects in this organization.</p>
+                  ) : orgProjects.map((p) => (
+                    <label key={p.id} style={{
+                      display: "flex", alignItems: "center", gap: "10px",
+                      padding: "10px 14px", background: selectedProjIds.has(p.id) ? "#012d5a" : "#0f172a",
+                      border: `1px solid ${selectedProjIds.has(p.id) ? "#0095da" : "#334155"}`,
+                      borderRadius: "8px", cursor: "pointer", transition: "background 0.1s",
+                    }}>
+                      <input type="checkbox" checked={selectedProjIds.has(p.id)} onChange={() => toggleProject(p.id)}
+                        style={{ width: "15px", height: "15px", accentColor: "#0095da", flexShrink: 0 }} />
+                      <span style={{ color: "#f1f5f9", fontSize: "14px" }}>{p.name}</span>
+                    </label>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button onClick={() => setPushModal(null)} style={{
+                    flex: 1, padding: "10px", background: "#334155", color: "#f1f5f9",
+                    border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "14px", fontFamily: "Manrope, sans-serif",
+                  }}>Cancel</button>
+                  <button onClick={checkAndPush} disabled={selectedProjIds.size === 0} style={{
+                    flex: 2, padding: "10px", fontWeight: "600", fontSize: "14px", border: "none",
+                    borderRadius: "8px", fontFamily: "Manrope, sans-serif",
+                    background: selectedProjIds.size > 0 ? "#0095da" : "#1e293b",
+                    color: selectedProjIds.size > 0 ? "white" : "#475569",
+                    cursor: selectedProjIds.size > 0 ? "pointer" : "not-allowed",
+                  }}>
+                    Push to {selectedProjIds.size || 0} Project{selectedProjIds.size !== 1 ? "s" : ""}
                   </button>
                 </div>
               </div>
