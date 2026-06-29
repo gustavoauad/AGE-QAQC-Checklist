@@ -50,6 +50,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   }, [project.id]);
 
   const [itemMsMap, setItemMsMap] = useState({}); // itemId → [milestoneName, ...]
+  const [commentMeta, setCommentMeta] = useState({}); // itemId → { count, hasQaqc }
 
   const fetchAll = async () => {
     setLoading(true);
@@ -59,7 +60,23 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       supabase.from("project_members").select("user_id").eq("project_id", project.id),
       supabase.from("project_milestones").select("*").eq("project_id", project.id).order("date"),
     ]);
-    if (!checklistRes.error) setChecklists(checklistRes.data || []);
+    const items = checklistRes.data || [];
+    if (!checklistRes.error) setChecklists(items);
+
+    // Fetch comment metadata (count + QAQC flag) for all items upfront
+    if (items.length > 0) {
+      const { data: cmData } = await supabase
+        .from("checklist_comments")
+        .select("checklist_item_id, is_qaqc_flagged")
+        .in("checklist_item_id", items.map((c) => c.id));
+      const meta = {};
+      (cmData || []).forEach((c) => {
+        if (!meta[c.checklist_item_id]) meta[c.checklist_item_id] = { count: 0, hasQaqc: false };
+        meta[c.checklist_item_id].count++;
+        if (c.is_qaqc_flagged) meta[c.checklist_item_id].hasQaqc = true;
+      });
+      setCommentMeta(meta);
+    }
     const cfgMap = {};
     (configRes.data || []).forEach((r) => { cfgMap[r.category] = { enabled: r.enabled, label: r.label }; });
     setCategoryConfig(cfgMap);
@@ -224,6 +241,11 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     }).select().single();
     if (!error && data) {
       setCommentsCache((prev) => ({ ...prev, [itemId]: [...(prev[itemId] || []), data] }));
+      setCommentMeta((prev) => {
+        const cur = prev[itemId] || { count: 0, hasQaqc: false };
+        return { ...prev, [itemId]: { count: cur.count + 1, hasQaqc: cur.hasQaqc || !!data.is_qaqc_flagged } };
+      });
+      setQaqcAlertsLoaded(false); // refresh dashboard alerts on next open
       setCommentText("");
     }
     setAddingComment(false);
@@ -249,12 +271,18 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   };
 
   const deleteComment = async (itemId, commentId) => {
+    const deletedComment = (commentsCache[itemId] || []).find((c) => c.id === commentId);
     const { error } = await supabase.from("checklist_comments").delete().eq("id", commentId);
     if (!error) {
-      setCommentsCache((prev) => ({
-        ...prev,
-        [itemId]: prev[itemId].filter((c) => c.id !== commentId),
-      }));
+      const remaining = (commentsCache[itemId] || []).filter((c) => c.id !== commentId);
+      setCommentsCache((prev) => ({ ...prev, [itemId]: remaining }));
+      setCommentMeta((prev) => {
+        const cur = prev[itemId] || { count: 0, hasQaqc: false };
+        const newCount = Math.max(0, cur.count - 1);
+        const stillHasQaqc = remaining.some((c) => c.is_qaqc_flagged);
+        return { ...prev, [itemId]: { count: newCount, hasQaqc: stillHasQaqc } };
+      });
+      if (deletedComment?.is_qaqc_flagged) setQaqcAlertsLoaded(false);
     }
   };
 
@@ -336,6 +364,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     const inProgressByName = item.in_progress_by ? (profilesMap[item.in_progress_by]?.full_name || "Unknown") : null;
     const comments = commentsCache[item.id] || [];
     const isCommentsOpen = openComments === item.id;
+    const meta = commentMeta[item.id] || { count: 0, hasQaqc: false };
     const sc = statusColors[status] || statusColors.pending;
     const msList = itemMsMap[item.id] || [];
     const dueDate = getItemDueDate(item);
@@ -365,6 +394,16 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
             </span>
             {item.is_custom && <span style={{ fontSize: "10px", color: "var(--c-purple)", background: "var(--c-purple-bg)", padding: "2px 7px", borderRadius: "20px" }}>custom</span>}
             {item.edited_by_pm && <span style={{ fontSize: "10px", color: "var(--c-warn)", background: "var(--c-warn-bg)", padding: "2px 7px", borderRadius: "20px" }}>✏ edited</span>}
+            {meta.hasQaqc && (
+              <span style={{ fontSize: "10px", fontWeight: "700", color: "var(--c-warn)", background: "var(--c-warn-bg)", border: "1px solid var(--c-warn)", padding: "2px 8px", borderRadius: "20px", letterSpacing: "0.03em" }}>
+                🚩 QA/QC
+              </span>
+            )}
+            {!meta.hasQaqc && meta.count > 0 && (
+              <span style={{ fontSize: "10px", fontWeight: "600", color: "var(--c-accent-lt)", background: "var(--c-accent-dk)", border: "1px solid #0095da", padding: "2px 8px", borderRadius: "20px" }}>
+                💬 {meta.count}
+              </span>
+            )}
 
             {/* Push status buttons and comment to the right */}
             <div style={{ flex: 1 }} />
@@ -405,17 +444,14 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
 
             {/* Comment button */}
             <button onClick={() => toggleComments(item.id)} style={{
-              flexShrink: 0, position: "relative",
-              background: isCommentsOpen ? "var(--c-accent-dk)" : "transparent",
-              border: `1px solid ${isCommentsOpen ? "var(--c-accent)" : "var(--c-border)"}`,
-              color: isCommentsOpen ? "var(--c-accent-lt)" : "var(--c-text-3)",
+              flexShrink: 0,
+              background: isCommentsOpen ? "var(--c-accent-dk)" : meta.hasQaqc ? "var(--c-warn-bg)" : "transparent",
+              border: `1px solid ${isCommentsOpen ? "var(--c-accent)" : meta.hasQaqc ? "var(--c-warn)" : "var(--c-border)"}`,
+              color: isCommentsOpen ? "var(--c-accent-lt)" : meta.hasQaqc ? "var(--c-warn)" : "var(--c-text-3)",
               borderRadius: "6px", padding: "4px 10px",
-              fontSize: "11px", cursor: "pointer", whiteSpace: "nowrap",
+              fontSize: "11px", cursor: "pointer", whiteSpace: "nowrap", fontWeight: meta.hasQaqc ? "700" : "400",
             }}>
-              💬{comments.length > 0 ? ` ${comments.length}` : ""}
-              {comments.some((c) => c.is_qaqc_flagged) && (
-                <span style={{ position: "absolute", top: "-4px", right: "-4px", width: "8px", height: "8px", background: "var(--c-warn)", borderRadius: "50%", border: "2px solid var(--c-bg)" }} />
-              )}
+              💬{meta.count > 0 ? ` ${meta.count}` : ""}
             </button>
 
             {/* Help popover button */}
@@ -850,6 +886,32 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
             return (
               <>
                 <h2 style={{ color: "var(--c-text)", margin: "0 0 20px", fontSize: "18px" }}>Project Dashboard</h2>
+
+                {/* QA/QC flagged comments — top priority banner */}
+                {qaqcAlerts.length > 0 && (
+                  <div style={{ marginBottom: "24px", background: "var(--c-warn-bg)", border: "2px solid var(--c-warn)", borderRadius: "10px", padding: "14px 16px" }}>
+                    <h3 style={{ color: "var(--c-warn)", margin: "0 0 12px", fontSize: "14px", fontWeight: "700", display: "flex", alignItems: "center", gap: "8px" }}>
+                      🚩 QA/QC Comments Requiring Response
+                      <span style={{ background: "var(--c-warn)", color: "white", borderRadius: "20px", padding: "1px 9px", fontSize: "12px" }}>{qaqcAlerts.length}</span>
+                    </h3>
+                    <div style={{ display: "grid", gap: "8px" }}>
+                      {qaqcAlerts.map((c) => (
+                        <div key={c.id} style={{ background: "var(--c-surface)", borderRadius: "8px", padding: "10px 14px", borderLeft: "3px solid var(--c-warn)" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px", flexWrap: "wrap", gap: "6px" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              <span style={{ fontSize: "11px", fontWeight: "700", color: "var(--c-warn)", background: "var(--c-warn-bg)", border: "1px solid var(--c-warn)", borderRadius: "20px", padding: "1px 8px" }}>QA/QC</span>
+                              <span style={{ fontSize: "12px", color: "var(--c-text)", fontWeight: "600" }}>{c.authorName}</span>
+                            </div>
+                            <span style={{ fontSize: "11px", color: "var(--c-text-3)" }}>{formatDate(c.created_at)}</span>
+                          </div>
+                          <p style={{ margin: "0 0 6px", fontSize: "13px", color: "var(--c-text)", lineHeight: "1.5" }}>{c.comment}</p>
+                          <p style={{ margin: 0, fontSize: "11px", color: "var(--c-text-4)" }}>📋 {c.itemText}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Stats */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: "10px", marginBottom: "28px" }}>
                   {statCard("Total", totalItems, "var(--c-text)")}
@@ -882,25 +944,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                     </div>
                   </div>
                 )}
-                {/* QAQC alerts */}
-                {qaqcAlerts.length > 0 && (
-                  <div style={{ marginBottom: "24px" }}>
-                    <h3 style={{ color: "var(--c-warn)", margin: "0 0 10px", fontSize: "14px", fontWeight: "700" }}>🚩 QA/QC Flagged Comments ({qaqcAlerts.length})</h3>
-                    <div style={{ display: "grid", gap: "8px" }}>
-                      {qaqcAlerts.map((c) => (
-                        <div key={c.id} style={{ background: "var(--c-surface)", border: "1px solid var(--c-warn)", borderRadius: "8px", padding: "10px 14px" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
-                            <span style={{ fontSize: "12px", color: "var(--c-warn)", fontWeight: "700" }}>{c.authorName}</span>
-                            <span style={{ fontSize: "11px", color: "var(--c-text-3)" }}>{formatDate(c.created_at)}</span>
-                          </div>
-                          <p style={{ margin: "0 0 6px", fontSize: "13px", color: "var(--c-text)" }}>{c.comment}</p>
-                          <p style={{ margin: 0, fontSize: "11px", color: "var(--c-text-4)" }}>On: {c.itemText}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {pastDueItems.length === 0 && dueSoonItems.length === 0 && inProgressItems.length === 0 && qaqcAlerts.length === 0 && (
+                {qaqcAlerts.length === 0 && pastDueItems.length === 0 && dueSoonItems.length === 0 && inProgressItems.length === 0 && (
                   <p style={{ color: "var(--c-text-3)", textAlign: "center", paddingTop: "20px" }}>No alerts — all clear! 🎉</p>
                 )}
               </>
