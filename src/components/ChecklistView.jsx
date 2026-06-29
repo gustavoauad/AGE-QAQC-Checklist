@@ -53,6 +53,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   }, [project.id]);
 
   const [itemMsMap, setItemMsMap] = useState({}); // itemId → [milestoneName, ...]
+  const [itemMsDaysMap, setItemMsDaysMap] = useState({}); // itemId → { [milestoneId]: days_before }
   const [commentMeta, setCommentMeta] = useState({}); // itemId → { count, hasQaqc }
   const [itemDeps, setItemDeps] = useState({}); // itemId → Set<parentId>
 
@@ -91,20 +92,24 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       // Build itemId → [milestoneName] map for display
       const msIds = ms.map((m) => m.id);
       const { data: miData } = await supabase.from("milestone_items")
-        .select("milestone_id, checklist_item_id").in("milestone_id", msIds);
+        .select("milestone_id, checklist_item_id, days_before").in("milestone_id", msIds);
       const imMap = {};
-      (miData || []).forEach(({ milestone_id, checklist_item_id }) => {
+      const imIdMap = {};
+      const imDaysMap = {}; // itemId → { [milestoneId]: days_before }
+      (miData || []).forEach(({ milestone_id, checklist_item_id, days_before }) => {
         if (!imMap[checklist_item_id]) imMap[checklist_item_id] = [];
         const msName = ms.find((m) => m.id === milestone_id)?.name;
         if (msName) imMap[checklist_item_id].push(msName);
-      });
-      setItemMsMap(imMap);
-      const imIdMap = {};
-      (miData || []).forEach(({ milestone_id, checklist_item_id }) => {
         if (!imIdMap[checklist_item_id]) imIdMap[checklist_item_id] = [];
         imIdMap[checklist_item_id].push(milestone_id);
+        if (days_before != null) {
+          if (!imDaysMap[checklist_item_id]) imDaysMap[checklist_item_id] = {};
+          imDaysMap[checklist_item_id][milestone_id] = days_before;
+        }
       });
+      setItemMsMap(imMap);
       setItemMsIdMap(imIdMap);
+      setItemMsDaysMap(imDaysMap);
     }
     // Load item dependencies
     if (items.length > 0) {
@@ -201,17 +206,30 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     return false;
   };
 
+  // Returns array of { milestoneId, milestoneName, msDate, dueDate, daysLeft } for each
+  // milestone assigned to this item that has a days_before value set, sorted soonest first.
+  const getItemDueInfo = (itemId) => {
+    const daysMap = itemMsDaysMap[itemId] || {};
+    const msIds = itemMsIdMap[itemId] || [];
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return msIds
+      .map((msId) => {
+        const days = daysMap[msId];
+        if (days == null) return null;
+        const m = milestones.find((x) => x.id === msId);
+        if (!m?.date) return null;
+        const msDate = new Date(m.date + "T00:00:00");
+        const dueDate = new Date(msDate.getTime() - days * 86400000);
+        const daysLeft = Math.ceil((dueDate - today) / 86400000);
+        return { milestoneId: msId, milestoneName: m.name, msDate, dueDate, daysLeft };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.dueDate - b.dueDate);
+  };
+
   const getItemDueDate = (item) => {
-    if (!item.days_before_milestone) return null;
-    const msIds = itemMsIdMap[item.id] || [];
-    if (!msIds.length) return null;
-    const dates = msIds.map((id) => {
-      const m = milestones.find((x) => x.id === id);
-      if (!m?.date) return null;
-      const msDate = new Date(m.date + "T00:00:00");
-      return new Date(msDate.getTime() - item.days_before_milestone * 86400000);
-    }).filter(Boolean);
-    return dates.length ? new Date(Math.min(...dates.map((d) => d.getTime()))) : null;
+    const info = getItemDueInfo(item.id);
+    return info.length ? info[0].dueDate : null;
   };
 
   // Returns all items that (transitively) depend on itemId (children + grandchildren…)
@@ -513,11 +531,6 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     const meta = commentMeta[item.id] || { count: 0, hasQaqc: false };
     const sc = statusColors[status] || statusColors.pending;
     const msList = itemMsMap[item.id] || [];
-    const dueDate = getItemDueDate(item);
-    const today = new Date(); today.setHours(0,0,0,0);
-    const dueDaysLeft = dueDate ? Math.ceil((dueDate - today) / 86400000) : null;
-    const isPastDue = dueDate && dueDate < today && status !== "complete" && status !== "na";
-    const isDueSoon = dueDate && dueDaysLeft >= 0 && dueDaysLeft <= 7 && status !== "complete" && status !== "na";
     const isHelpOpen = helpPopover === item.id;
 
     return (
@@ -644,41 +657,68 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
             {item.item_text}
           </p>
 
-          {/* Row 3: Attribution + due date + milestones */}
-          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
-            {status === "complete" && completedByName && (
-              <span style={{ fontSize: "11px", color: "var(--c-ok-text)", flexShrink: 0 }}>
-                ✓ {completedByName} · {formatDate(item.completed_at)}
-              </span>
-            )}
-            {status === "in_progress" && inProgressByName && (
-              <span style={{ fontSize: "11px", color: "var(--c-purple)", flexShrink: 0 }}>
-                ▶ {inProgressByName} · {formatDate(item.in_progress_at)}
-              </span>
-            )}
-            {dueDate && status !== "complete" && status !== "na" && (
-              <span style={{
-                fontSize: "10px", fontWeight: "700", flexShrink: 0,
-                color: isPastDue ? "var(--c-err)" : isDueSoon ? "var(--c-warn)" : "var(--c-text-3)",
-                background: isPastDue ? "var(--c-err-bg)" : isDueSoon ? "var(--c-warn-bg)" : "transparent",
-                border: `1px solid ${isPastDue ? "#7f1d1d" : isDueSoon ? "var(--c-warn)" : "var(--c-border)"}`,
-                borderRadius: "3px", padding: "2px 7px",
-              }}>
-                {isPastDue ? "⚠ PAST DUE" : isDueSoon ? `⚠ due in ${dueDaysLeft}d` : `due ${formatDate(dueDate.toISOString())}`}
-              </span>
-            )}
-            {milestones.length > 0 && (
-              <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px" }}>
-                <span style={{ fontSize: "10px", color: "var(--c-text-4)", fontWeight: "600", textTransform: "uppercase", letterSpacing: "0.05em", flexShrink: 0 }}>Milestones:</span>
-                {msList.length > 0
-                  ? msList.map((name) => (
-                      <span key={name} style={{ fontSize: "10px", background: "var(--c-accent-dk)", color: "var(--c-accent-lt)", border: "1px solid #0095da", borderRadius: "3px", padding: "2px 7px" }}>{name}</span>
-                    ))
-                  : <span style={{ fontSize: "10px", color: "var(--c-err)", background: "var(--c-err-bg)", border: "1px solid #7f1d1d", borderRadius: "3px", padding: "2px 7px" }}>⚠ not assigned</span>
-                }
+          {/* Row 3: Attribution + milestone due dates */}
+          {(() => {
+            const dueInfos = getItemDueInfo(item.id);
+            const today3 = new Date(); today3.setHours(0, 0, 0, 0);
+            const showDue = status !== "complete" && status !== "na";
+            const hasAny = (status === "complete" && completedByName) ||
+              (status === "in_progress" && inProgressByName) ||
+              milestones.length > 0;
+            if (!hasAny) return null;
+            return (
+              <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px", marginTop: "2px" }}>
+                {status === "complete" && completedByName && (
+                  <span style={{ fontSize: "11px", color: "var(--c-ok-text)", flexShrink: 0 }}>
+                    ✓ {completedByName} · {formatDate(item.completed_at)}
+                  </span>
+                )}
+                {status === "in_progress" && inProgressByName && (
+                  <span style={{ fontSize: "11px", color: "var(--c-purple)", flexShrink: 0 }}>
+                    ▶ {inProgressByName} · {formatDate(item.in_progress_at)}
+                  </span>
+                )}
+                {milestones.length > 0 && msList.length === 0 && (
+                  <span style={{ fontSize: "10px", color: "var(--c-err)", background: "var(--c-err-bg)", border: "1px solid #7f1d1d", borderRadius: "3px", padding: "2px 7px" }}>⚠ not assigned to milestone</span>
+                )}
+                {/* Per-milestone due date chips */}
+                {msList.map((name) => {
+                  const msId = (itemMsIdMap[item.id] || []).find((id) => milestones.find((m) => m.id === id)?.name === name);
+                  const info = dueInfos.find((d) => d.milestoneId === msId);
+                  if (!info || !showDue) {
+                    // No days_before set — show plain milestone chip
+                    return (
+                      <span key={name} style={{ fontSize: "10px", background: "var(--c-accent-dk)", color: "var(--c-accent-lt)", border: "1px solid #0095da", borderRadius: "3px", padding: "2px 7px" }}>
+                        📅 {name}
+                      </span>
+                    );
+                  }
+                  const isPast = info.daysLeft < 0;
+                  const isSoon = info.daysLeft >= 0 && info.daysLeft <= 7;
+                  const color = isPast ? "var(--c-err)" : isSoon ? "var(--c-warn)" : "var(--c-text-3)";
+                  const bg = isPast ? "var(--c-err-bg)" : isSoon ? "var(--c-warn-bg)" : "var(--c-surface)";
+                  const border = isPast ? "#7f1d1d" : isSoon ? "var(--c-warn)" : "var(--c-border)";
+                  const dayLabel = isPast
+                    ? `${Math.abs(info.daysLeft)}d overdue`
+                    : info.daysLeft === 0
+                    ? "due today"
+                    : `${info.daysLeft}d left`;
+                  return (
+                    <span key={name} title={`Due ${info.dueDate.toLocaleDateString()} — ${info.daysLeft >= 0 ? info.daysLeft : 0}d before ${name} (${info.msDate.toLocaleDateString()})`}
+                      style={{ fontSize: "10px", fontWeight: isSoon || isPast ? "700" : "500", color, background: bg, border: `1px solid ${border}`, borderRadius: "3px", padding: "2px 8px", whiteSpace: "nowrap" }}>
+                      {isPast ? "⚠ " : isSoon ? "⏰ " : "📅 "}{name} · {info.dueDate.toLocaleDateString(undefined, { month: "short", day: "numeric" })} · {dayLabel}
+                    </span>
+                  );
+                })}
+                {/* Completed items: show milestone names without due urgency */}
+                {!showDue && msList.map((name) => (
+                  <span key={name} style={{ fontSize: "10px", background: "var(--c-surface)", color: "var(--c-text-4)", border: "1px solid var(--c-border)", borderRadius: "3px", padding: "2px 7px" }}>
+                    📅 {name}
+                  </span>
+                ))}
               </div>
-            )}
-          </div>
+            );
+          })()}
         </div>
 
         {/* Comments panel */}
@@ -941,7 +981,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
               const today = new Date(); today.setHours(0,0,0,0);
               const inProgCount = checklists.filter((c) => c.status === "in_progress").length;
               const withDue = checklists
-                .filter((c) => c.days_before_milestone && c.status !== "complete" && c.status !== "na")
+                .filter((c) => c.status !== "complete" && c.status !== "na")
                 .map((c) => ({ id: c.id, dueDate: getItemDueDate(c) }))
                 .filter((c) => c.dueDate);
               const pastDueCount = withDue.filter((c) => c.dueDate < today).length;
