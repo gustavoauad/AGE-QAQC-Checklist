@@ -27,9 +27,10 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const [filterApplicable, setFilterApplicable] = useState(false);
   const [helpPopover, setHelpPopover] = useState(null); // item.id
   const [itemMsIdMap, setItemMsIdMap] = useState({}); // itemId → [milestoneId, ...]
-  const [dashboardView, setDashboardView] = useState(false);
   const [qaqcAlerts, setQaqcAlerts] = useState([]); // flagged comments
   const [qaqcAlertsLoaded, setQaqcAlertsLoaded] = useState(false);
+  const [dashReplyText, setDashReplyText] = useState({}); // { [itemId]: string }
+  const [dashReplying, setDashReplying] = useState(null); // itemId
 
   useEffect(() => { fetchAll(); }, []);
 
@@ -257,7 +258,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     if (!itemIds.length) { setQaqcAlertsLoaded(true); return; }
     const { data } = await supabase
       .from("checklist_comments")
-      .select("*, checklist:checklists(item_text, category)")
+      .select("*, checklist:checklists(id, item_text, category)")
       .eq("is_qaqc_flagged", true)
       .in("checklist_item_id", itemIds)
       .order("created_at", { ascending: false });
@@ -265,9 +266,38 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       ...c,
       authorName: profilesMap[c.user_id]?.full_name || "QAQC",
       itemText: c.checklist?.item_text || "",
+      itemCategory: c.checklist?.category || null,
     }));
     setQaqcAlerts(alerts);
     setQaqcAlertsLoaded(true);
+  };
+
+  const submitDashReply = async (itemId) => {
+    const text = (dashReplyText[itemId] || "").trim();
+    if (!text) return;
+    setDashReplying(itemId);
+    const { data, error } = await supabase.from("checklist_comments").insert({
+      checklist_item_id: itemId, user_id: session.user.id, comment: text,
+      is_qaqc_flagged: userRole === "qaqc",
+    }).select().single();
+    if (!error && data) {
+      setCommentsCache((prev) => ({ ...prev, [itemId]: [...(prev[itemId] || []), data] }));
+      setCommentMeta((prev) => {
+        const cur = prev[itemId] || { count: 0, hasQaqc: false };
+        return { ...prev, [itemId]: { count: cur.count + 1, hasQaqc: cur.hasQaqc || !!data.is_qaqc_flagged } };
+      });
+      setDashReplyText((prev) => ({ ...prev, [itemId]: "" }));
+      setQaqcAlertsLoaded(false);
+      await loadQaqcAlerts();
+    }
+    setDashReplying(null);
+  };
+
+  const goToItem = (itemId, category) => {
+    setViewMode("category");
+    setActiveCategory(category);
+    setOpenComments(itemId);
+    fetchComments(itemId);
   };
 
   const deleteComment = async (itemId, commentId) => {
@@ -779,7 +809,53 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         {/* Sidebar (desktop only) */}
         {!isMobile && (
           <div style={{ width: "220px", background: "var(--c-surface)", borderRight: "1px solid #334155", overflowY: "auto", padding: "12px" }}>
-            {viewMode === "category" ? (
+            {viewMode === "dashboard" ? (() => {
+              const today = new Date(); today.setHours(0,0,0,0);
+              const inProgCount = checklists.filter((c) => c.status === "in_progress").length;
+              const withDue = checklists
+                .filter((c) => c.days_before_milestone && c.status !== "complete" && c.status !== "na")
+                .map((c) => ({ id: c.id, dueDate: getItemDueDate(c) }))
+                .filter((c) => c.dueDate);
+              const pastDueCount = withDue.filter((c) => c.dueDate < today).length;
+              const dueSoonCount = withDue.filter((c) => { const d = Math.ceil((c.dueDate - today) / 86400000); return d >= 0 && d <= 7; }).length;
+              const sections = [
+                { label: "QA/QC Alerts",  icon: "🚩", count: qaqcAlerts.length,  color: "var(--c-warn)" },
+                { label: "Past Due",       icon: "⚠",  count: pastDueCount,       color: "var(--c-err)" },
+                { label: "Due Soon",       icon: "⏰", count: dueSoonCount,       color: "var(--c-warn)" },
+                { label: "In Progress",    icon: "▶",  count: inProgCount,        color: "var(--c-purple)" },
+              ];
+              return (
+                <>
+                  <p style={{ fontSize: "11px", fontWeight: "700", color: "var(--c-text-3)", textTransform: "uppercase", letterSpacing: "0.06em", margin: "4px 0 12px 4px" }}>Overview</p>
+                  {sections.map(({ label, icon, count, color }) => (
+                    <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", borderRadius: "8px", marginBottom: "4px", background: count > 0 ? "transparent" : "transparent" }}>
+                      <span style={{ fontSize: "13px", color: count > 0 ? "var(--c-text)" : "var(--c-text-4)" }}>{icon} {label}</span>
+                      <span style={{ fontSize: "12px", fontWeight: "700", color: count > 0 ? color : "var(--c-text-4)",
+                        background: count > 0 ? undefined : "transparent",
+                        minWidth: "20px", textAlign: "right" }}>
+                        {count > 0 ? count : "—"}
+                      </span>
+                    </div>
+                  ))}
+                  <div style={{ borderTop: "1px solid var(--c-border)", margin: "12px 0" }} />
+                  <p style={{ fontSize: "11px", fontWeight: "700", color: "var(--c-text-3)", textTransform: "uppercase", letterSpacing: "0.06em", margin: "0 0 8px 4px" }}>Progress</p>
+                  <div style={{ padding: "8px 10px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                      <span style={{ fontSize: "12px", color: "var(--c-text-2)" }}>Overall</span>
+                      <span style={{ fontSize: "12px", fontWeight: "700", color: overallProgress === 100 ? "var(--c-ok-text)" : "var(--c-accent)" }}>{overallProgress}%</span>
+                    </div>
+                    <div style={{ height: "6px", background: "var(--c-border)", borderRadius: "3px", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${overallProgress}%`, background: overallProgress === 100 ? "var(--c-ok)" : "var(--c-accent)", borderRadius: "3px", transition: "width 0.3s" }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "11px", color: "var(--c-text-3)" }}>
+                      <span>✓ {completedItems}</span>
+                      <span>▶ {inProgCount}</span>
+                      <span>— {pendingItems}</span>
+                    </div>
+                  </div>
+                </>
+              );
+            })() : viewMode === "category" ? (
               enabledCategories.map((cat) => {
                 const { done, applicable, pct } = getCategoryStats(cat.id);
                 const isActive = activeCategory === cat.id;
@@ -805,6 +881,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
               milestones.length === 0 ? (
                 <p style={{ color: "var(--c-text-3)", fontSize: "12px", padding: "8px" }}>No milestones set up.</p>
               ) : (
+
                 milestones.map((m) => {
                   const isActive = activeMilestoneId === m.id;
                   const progress = getMilestoneProgress(m.id);
@@ -896,18 +973,46 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                       🚩 QA/QC Comments Requiring Response
                       <span style={{ background: "var(--c-warn)", color: "white", borderRadius: "20px", padding: "1px 9px", fontSize: "12px" }}>{qaqcAlerts.length}</span>
                     </h3>
-                    <div style={{ display: "grid", gap: "8px" }}>
+                    <div style={{ display: "grid", gap: "10px" }}>
                       {qaqcAlerts.map((c) => (
-                        <div key={c.id} style={{ background: "var(--c-surface)", borderRadius: "8px", padding: "10px 14px", borderLeft: "3px solid var(--c-warn)" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px", flexWrap: "wrap", gap: "6px" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                              <span style={{ fontSize: "11px", fontWeight: "700", color: "var(--c-warn)", background: "var(--c-warn-bg)", border: "1px solid var(--c-warn)", borderRadius: "20px", padding: "1px 8px" }}>QA/QC</span>
-                              <span style={{ fontSize: "12px", color: "var(--c-text)", fontWeight: "600" }}>{c.authorName}</span>
-                            </div>
-                            <span style={{ fontSize: "11px", color: "var(--c-text-3)" }}>{formatDate(c.created_at)}</span>
+                        <div key={c.id} style={{ background: "var(--c-surface)", borderRadius: "8px", borderLeft: "3px solid var(--c-warn)", overflow: "hidden" }}>
+                          {/* Checklist item context */}
+                          <div style={{ background: "var(--c-surface-alt)", padding: "8px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" }}>
+                            <span style={{ fontSize: "12px", color: "var(--c-text-2)", flex: 1 }}>📋 {c.itemText}</span>
+                            {c.itemCategory && (
+                              <button onClick={() => goToItem(c.checklist_item_id, c.itemCategory)}
+                                style={{ flexShrink: 0, fontSize: "11px", fontWeight: "600", color: "var(--c-accent-lt)", background: "var(--c-accent-dk)", border: "1px solid #0095da", borderRadius: "6px", padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                Go to item →
+                              </button>
+                            )}
                           </div>
-                          <p style={{ margin: "0 0 6px", fontSize: "13px", color: "var(--c-text)", lineHeight: "1.5" }}>{c.comment}</p>
-                          <p style={{ margin: 0, fontSize: "11px", color: "var(--c-text-4)" }}>📋 {c.itemText}</p>
+                          {/* Comment */}
+                          <div style={{ padding: "10px 14px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px", flexWrap: "wrap", gap: "6px" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                <span style={{ fontSize: "11px", fontWeight: "700", color: "var(--c-warn)", background: "var(--c-warn-bg)", border: "1px solid var(--c-warn)", borderRadius: "20px", padding: "1px 8px" }}>QA/QC</span>
+                                <span style={{ fontSize: "12px", color: "var(--c-text)", fontWeight: "600" }}>{c.authorName}</span>
+                              </div>
+                              <span style={{ fontSize: "11px", color: "var(--c-text-3)" }}>{formatDate(c.created_at)}</span>
+                            </div>
+                            <p style={{ margin: "0 0 10px", fontSize: "13px", color: "var(--c-text)", lineHeight: "1.5" }}>{c.comment}</p>
+                            {/* Inline reply */}
+                            <div style={{ display: "flex", gap: "6px" }}>
+                              <input
+                                value={dashReplyText[c.checklist_item_id] || ""}
+                                onChange={(e) => setDashReplyText((prev) => ({ ...prev, [c.checklist_item_id]: e.target.value }))}
+                                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && submitDashReply(c.checklist_item_id)}
+                                placeholder="Reply…"
+                                style={{ flex: 1, padding: "6px 10px", background: "var(--c-bg)", border: "1px solid var(--c-border)", borderRadius: "6px", color: "var(--c-text)", fontSize: "12px" }}
+                              />
+                              <button
+                                onClick={() => submitDashReply(c.checklist_item_id)}
+                                disabled={dashReplying === c.checklist_item_id || !(dashReplyText[c.checklist_item_id] || "").trim()}
+                                style={{ padding: "6px 12px", background: "var(--c-accent)", color: "white", border: "none", borderRadius: "6px", fontSize: "12px", fontWeight: "600", cursor: "pointer" }}>
+                                {dashReplying === c.checklist_item_id ? "…" : "Reply"}
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       ))}
                     </div>
