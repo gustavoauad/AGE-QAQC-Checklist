@@ -54,8 +54,10 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
 
   const [itemMsMap, setItemMsMap] = useState({}); // itemId → [milestoneName, ...]
   const [itemMsDaysMap, setItemMsDaysMap] = useState({}); // itemId → { [milestoneId]: days_before }
+  const [itemMsCompletedMap, setItemMsCompletedMap] = useState({}); // itemId → { [milestoneId]: { completedAt, completedBy } | null }
   const [commentMeta, setCommentMeta] = useState({}); // itemId → { count, hasQaqc }
   const [itemDeps, setItemDeps] = useState({}); // itemId → Set<parentId>
+  const [milestoneCompletePopup, setMilestoneCompletePopup] = useState(null); // { item, selected: Set<milestoneId> }
 
   const fetchAll = async () => {
     setLoading(true);
@@ -92,11 +94,12 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       // Build itemId → [milestoneName] map for display
       const msIds = ms.map((m) => m.id);
       const { data: miData } = await supabase.from("milestone_items")
-        .select("milestone_id, checklist_item_id, days_before").in("milestone_id", msIds);
+        .select("milestone_id, checklist_item_id, days_before, completed_at, completed_by").in("milestone_id", msIds);
       const imMap = {};
       const imIdMap = {};
       const imDaysMap = {}; // itemId → { [milestoneId]: days_before }
-      (miData || []).forEach(({ milestone_id, checklist_item_id, days_before }) => {
+      const imCompletedMap = {}; // itemId → { [milestoneId]: { completedAt, completedBy } | null }
+      (miData || []).forEach(({ milestone_id, checklist_item_id, days_before, completed_at, completed_by }) => {
         if (!imMap[checklist_item_id]) imMap[checklist_item_id] = [];
         const msName = ms.find((m) => m.id === milestone_id)?.name;
         if (msName) imMap[checklist_item_id].push(msName);
@@ -106,10 +109,13 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           if (!imDaysMap[checklist_item_id]) imDaysMap[checklist_item_id] = {};
           imDaysMap[checklist_item_id][milestone_id] = days_before;
         }
+        if (!imCompletedMap[checklist_item_id]) imCompletedMap[checklist_item_id] = {};
+        imCompletedMap[checklist_item_id][milestone_id] = completed_at ? { completedAt: completed_at, completedBy: completed_by } : null;
       });
       setItemMsMap(imMap);
       setItemMsIdMap(imIdMap);
       setItemMsDaysMap(imDaysMap);
+      setItemMsCompletedMap(imCompletedMap);
     }
     // Load item dependencies
     if (items.length > 0) {
@@ -214,30 +220,48 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     return false;
   };
 
-  // Returns array of { milestoneId, milestoneName, msDate, dueDate, daysLeft } for each
-  // milestone assigned to this item that has a days_before value set, sorted soonest first.
+  // Returns array of { milestoneId, milestoneName, msDate, dueDate, daysLeft, noDeadline, usesMsDateDefault, completed }
+  // for every milestone assigned to this item, sorted soonest-due first (no-deadline entries last).
+  // When no days_before is configured for the pair, the milestone's own date is used as the
+  // deadline (usesMsDateDefault: true) — noDeadline only remains true if the milestone itself
+  // has no date set (a data-integrity edge case, not the normal "not configured yet" case).
+  // `completed` is { completedAt, completedBy } | null — per-milestone completion, independent of
+  // the item's overall status (an item can be done for SD but still outstanding for DD).
   const getItemDueInfo = (itemId) => {
     const daysMap = itemMsDaysMap[itemId] || {};
     const msIds = itemMsIdMap[itemId] || [];
+    const completedMap = itemMsCompletedMap[itemId] || {};
     const today = new Date(); today.setHours(0, 0, 0, 0);
     return msIds
       .map((msId) => {
-        const days = daysMap[msId];
-        if (days == null) return null;
         const m = milestones.find((x) => x.id === msId);
-        if (!m?.date) return null;
+        if (!m) return null;
+        const completed = completedMap[msId] || null;
+        if (!m.date) {
+          return { milestoneId: msId, milestoneName: m.name, msDate: null, dueDate: null, daysLeft: null, noDeadline: true, usesMsDateDefault: false, completed };
+        }
+        const days = daysMap[msId];
+        const usesMsDateDefault = days == null;
         const msDate = new Date(m.date + "T00:00:00");
-        const dueDate = new Date(msDate.getTime() - days * 86400000);
+        const dueDate = new Date(msDate.getTime() - (days ?? 0) * 86400000);
         const daysLeft = Math.ceil((dueDate - today) / 86400000);
-        return { milestoneId: msId, milestoneName: m.name, msDate, dueDate, daysLeft };
+        return { milestoneId: msId, milestoneName: m.name, msDate, dueDate, daysLeft, noDeadline: false, usesMsDateDefault, completed };
       })
       .filter(Boolean)
-      .sort((a, b) => a.dueDate - b.dueDate);
+      .sort((a, b) => {
+        if (a.noDeadline && b.noDeadline) return 0;
+        if (a.noDeadline) return 1;
+        if (b.noDeadline) return -1;
+        return a.dueDate - b.dueDate;
+      });
   };
 
+  // Earliest due date among milestones this item is still outstanding for
+  // (has a deadline, not yet completed for that specific milestone).
   const getItemDueDate = (item) => {
-    const info = getItemDueInfo(item.id);
-    return info.length ? info[0].dueDate : null;
+    const outstanding = getItemDueInfo(item.id).filter((d) => !d.noDeadline && !d.completed);
+    if (!outstanding.length) return null;
+    return outstanding.sort((a, b) => a.dueDate - b.dueDate)[0].dueDate;
   };
 
   // Returns all items that (transitively) depend on itemId (children + grandchildren…)
@@ -260,6 +284,28 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       (reverseDeps[id] || []).forEach((c) => stack.push(c));
     }
     return result;
+  };
+
+  // Stamps or clears completed_at/completed_by on milestone_items rows for one item.
+  // selectedIds === null means "all assigned milestones" (used by the simple 0/1-milestone path).
+  const syncMilestoneCompletion = async (itemId, msDone, selectedIds = null) => {
+    const assignedMsIds = itemMsIdMap[itemId] || [];
+    if (!assignedMsIds.length) return;
+    const now = new Date().toISOString();
+    await Promise.all(assignedMsIds.map((msId) => {
+      const isDone = msDone && (selectedIds === null || selectedIds.has(msId));
+      return supabase.from("milestone_items")
+        .update({ completed_at: isDone ? now : null, completed_by: isDone ? session.user.id : null })
+        .eq("checklist_item_id", itemId).eq("milestone_id", msId);
+    }));
+    setItemMsCompletedMap((prev) => {
+      const next = { ...prev, [itemId]: { ...(prev[itemId] || {}) } };
+      assignedMsIds.forEach((msId) => {
+        const isDone = msDone && (selectedIds === null || selectedIds.has(msId));
+        next[itemId][msId] = isDone ? { completedAt: now, completedBy: session.user.id } : null;
+      });
+      return next;
+    });
   };
 
   const handleStatusChange = async (item, newStatus) => {
@@ -292,6 +338,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         const naUpdates = { status: "na", completed_by: null, completed_at: null, in_progress_by: null, in_progress_at: null };
         await Promise.all(toNa.map((c) => supabase.from("checklists").update(naUpdates).eq("id", c.id)));
         setChecklists((prev) => prev.map((c) => toNa.find((x) => x.id === c.id) ? { ...c, ...naUpdates } : c));
+        await Promise.all(toNa.map((c) => syncMilestoneCompletion(c.id, false)));
       }
     }
 
@@ -305,9 +352,61 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       in_progress_at: newStatus === "in_progress" ? now : null,
     };
     const { error } = await supabase.from("checklists").update(updates).eq("id", item.id);
-    if (error) console.error("Status update failed:", error.message);
-    else setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
+    if (error) { console.error("Status update failed:", error.message); setUpdating(null); return; }
+    setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
+    // Direct button clicks are all-or-nothing: mirror the resulting status onto every
+    // assigned milestone. Partial (some-milestones-done) state can only be produced
+    // via the multi-milestone completion popup.
+    await syncMilestoneCompletion(item.id, newStatus === "complete");
     setUpdating(null);
+  };
+
+  // Opens the popup for items assigned to 2+ milestones, letting the user pick which
+  // specific deadline(s) this completion applies to instead of an all-or-nothing toggle.
+  const openMilestoneCompletePopup = (item) => {
+    const assignedMsIds = itemMsIdMap[item.id] || [];
+    const completedMap = itemMsCompletedMap[item.id] || {};
+    const selected = new Set(assignedMsIds.filter((id) => completedMap[id]));
+    if (item.status !== "complete" && item.status !== "in_progress" && selected.size === 0) {
+      assignedMsIds.forEach((id) => selected.add(id));
+    }
+    setMilestoneCompletePopup({ item, selected });
+  };
+
+  // Applies the popup's milestone selection: overall status is derived from how many of
+  // the assigned milestones are selected — all → complete, some → in_progress, none → pending.
+  const applyMilestoneCompletion = async (item, selectedIds) => {
+    const assignedMsIds = itemMsIdMap[item.id] || [];
+    const allSelected = assignedMsIds.length > 0 && selectedIds.size === assignedMsIds.length;
+
+    if (allSelected) {
+      const parentIds = [...(itemDeps[item.id] || new Set())];
+      const incomplete = checklists.filter((c) => parentIds.includes(c.id) && c.status !== "complete" && c.status !== "na");
+      if (incomplete.length > 0) {
+        alert(
+          `Cannot mark as complete — the following ${incomplete.length === 1 ? "dependency" : "dependencies"} must be completed first:\n\n` +
+          incomplete.map((c) => `• ${refCodes[c.id] ? refCodes[c.id] + "  " : ""}${c.item_text}`).join("\n")
+        );
+        return;
+      }
+    }
+
+    const newStatus = allSelected ? "complete" : selectedIds.size > 0 ? "in_progress" : "pending";
+    setUpdating(item.id);
+    const now = new Date().toISOString();
+    const updates = {
+      status: newStatus,
+      completed_by: newStatus === "complete" ? session.user.id : null,
+      completed_at: newStatus === "complete" ? now : null,
+      in_progress_by: newStatus === "in_progress" ? session.user.id : null,
+      in_progress_at: newStatus === "in_progress" ? now : null,
+    };
+    const { error } = await supabase.from("checklists").update(updates).eq("id", item.id);
+    if (error) { console.error("Milestone completion update failed:", error.message); setUpdating(null); return; }
+    setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
+    await syncMilestoneCompletion(item.id, true, selectedIds);
+    setUpdating(null);
+    setMilestoneCompletePopup(null);
   };
 
   const fetchComments = async (itemId) => {
@@ -597,11 +696,17 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                 ].map(({ s, label, title }) => {
                   const btn = statusColors[s];
                   const isActive = status === s;
+                  const assignedMsIds = itemMsIdMap[item.id] || [];
+                  const useMsPopup = s === "complete" && assignedMsIds.length >= 2;
                   return (
                     <button key={s}
-                      onClick={() => !isUpdating && handleStatusChange(item, isActive ? "pending" : s)}
+                      onClick={() => {
+                        if (isUpdating) return;
+                        if (useMsPopup) { openMilestoneCompletePopup(item); return; }
+                        handleStatusChange(item, isActive ? "pending" : s);
+                      }}
                       disabled={isUpdating}
-                      title={isActive ? `Remove ${title}` : `Mark ${title}`}
+                      title={useMsPopup ? "Choose which deadline(s) this is complete for" : isActive ? `Remove ${title}` : `Mark ${title}`}
                       style={{
                         padding: isMobile ? "4px 7px" : "4px 10px",
                         border: `1px solid ${isActive ? btn.border : "var(--c-border)"}`,
@@ -665,10 +770,9 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
             {item.item_text}
           </p>
 
-          {/* Row 3: Attribution + milestone due dates */}
+          {/* Row 3: Attribution + per-milestone due dates / completion */}
           {(() => {
             const dueInfos = getItemDueInfo(item.id);
-            const showUrgency = status !== "complete" && status !== "na";
             const msIds = itemMsIdMap[item.id] || [];
             const hasAny = (status === "complete" && completedByName) ||
               (status === "in_progress" && inProgressByName) ||
@@ -688,34 +792,54 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   </span>
                 )}
                 {milestones.length > 0 && msIds.length === 0 && (
-                  <span style={{ fontSize: "10px", color: "var(--c-text-4)", fontStyle: "italic" }}>no milestone</span>
+                  <span style={{ fontSize: "10px", fontWeight: "700", color: "var(--c-warn)", background: "var(--c-warn-bg)", border: "1px solid var(--c-warn)", borderRadius: "4px", padding: "2px 8px", whiteSpace: "nowrap" }}>
+                    ⚠ No deadline set
+                  </span>
                 )}
-                {msIds.map((msId) => {
+                {status !== "na" && msIds.map((msId) => {
                   const ms = milestones.find((m) => m.id === msId);
                   if (!ms) return null;
                   const info = dueInfos.find((d) => d.milestoneId === msId);
-                  // Completed/NA or no days_before configured — muted name chip
-                  if (!showUrgency || !info) {
+                  if (!info) return null;
+
+                  if (info.completed) {
+                    const doneStr = new Date(info.completed.completedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
                     return (
-                      <span key={msId} style={{ fontSize: "10px", fontWeight: "500", color: "var(--c-text-4)", background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: "4px", padding: "2px 7px", whiteSpace: "nowrap" }}>
-                        {ms.name}
+                      <span key={msId} title={`Marked complete for ${ms.name} on ${doneStr}`}
+                        style={{ fontSize: "10px", fontWeight: "600", color: "var(--c-ok-text)", background: "var(--c-ok-bg)", border: "1px solid var(--c-ok)", borderRadius: "4px", padding: "2px 8px", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                        <span>✓ {ms.name}</span>
+                        <span style={{ opacity: 0.5 }}>·</span>
+                        <span>done {doneStr}</span>
                       </span>
                     );
                   }
+
+                  if (info.noDeadline) {
+                    return (
+                      <span key={msId} title={`${ms.name} has no days-before value set in Project Setup — no due date computed`}
+                        style={{ fontSize: "10px", fontWeight: "600", color: "var(--c-warn)", background: "var(--c-warn-bg)", border: "1px solid var(--c-warn)", borderRadius: "4px", padding: "2px 8px", whiteSpace: "nowrap" }}>
+                        ⚠ {ms.name} · no deadline
+                      </span>
+                    );
+                  }
+
                   const isPast = info.daysLeft < 0;
                   const isSoon = info.daysLeft >= 0 && info.daysLeft <= 7;
                   const color = isPast ? "var(--c-err)" : isSoon ? "var(--c-warn)" : "var(--c-text-3)";
                   const bg = isPast ? "var(--c-err-bg)" : isSoon ? "var(--c-warn-bg)" : "transparent";
                   const border = isPast ? "#7f1d1d" : isSoon ? "var(--c-warn)" : "var(--c-border)";
                   const dueStr = info.dueDate.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-                  const dayLabel = isPast ? `${Math.abs(info.daysLeft)}d overdue` : info.daysLeft === 0 ? "today" : `${info.daysLeft}d`;
+                  const dayLabel = isPast ? `${Math.abs(info.daysLeft)}d overdue` : info.daysLeft === 0 ? "today" : `${info.daysLeft}d left`;
+                  const titleSuffix = info.usesMsDateDefault
+                    ? ` — no days-before set, using ${ms.name}'s own date (${ms.date}) as the deadline`
+                    : ` (${info.daysLeft >= 0 ? info.daysLeft + "d before" : Math.abs(info.daysLeft) + "d past"} ${ms.name} on ${ms.date})`;
                   return (
                     <span key={msId}
-                      title={`Due ${dueStr} (${info.daysLeft >= 0 ? info.daysLeft + "d before" : Math.abs(info.daysLeft) + "d past"} ${ms.name} on ${ms.date})`}
+                      title={`Due ${dueStr}${titleSuffix}`}
                       style={{ fontSize: "10px", fontWeight: isPast || isSoon ? "600" : "400", color, background: bg, border: `1px solid ${border}`, borderRadius: "4px", padding: "2px 8px", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: "4px" }}>
                       <span style={{ fontWeight: "700" }}>{isPast ? "⚠ " : isSoon ? "⏰ " : ""}{ms.name}</span>
                       <span style={{ opacity: 0.4 }}>·</span>
-                      <span>{dueStr}</span>
+                      <span>{dueStr}{info.usesMsDateDefault && <span style={{ opacity: 0.6 }}>*</span>}</span>
                       <span style={{ opacity: 0.4 }}>·</span>
                       <span style={{ fontWeight: "700" }}>{dayLabel}</span>
                     </span>
@@ -1556,6 +1680,52 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           )}
         </div>
       </div>
+
+      {/* Multi-milestone completion picker */}
+      {milestoneCompletePopup && (() => {
+        const { item, selected } = milestoneCompletePopup;
+        const assignedMsIds = itemMsIdMap[item.id] || [];
+        const toggleMs = (msId) => {
+          setMilestoneCompletePopup((prev) => {
+            const nextSel = new Set(prev.selected);
+            if (nextSel.has(msId)) nextSel.delete(msId); else nextSel.add(msId);
+            return { ...prev, selected: nextSel };
+          });
+        };
+        return (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: "16px" }}
+            onClick={() => setMilestoneCompletePopup(null)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "var(--c-surface)", borderRadius: "12px", padding: "20px 22px", width: "380px", maxWidth: "100%", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>
+              <h3 style={{ margin: "0 0 4px", fontSize: "15px", color: "var(--c-text)" }}>Complete for which deadline(s)?</h3>
+              <p style={{ margin: "0 0 14px", fontSize: "12px", color: "var(--c-text-3)", lineHeight: "1.5" }}>{item.item_text}</p>
+              <div style={{ display: "grid", gap: "8px", marginBottom: "18px", maxHeight: "50vh", overflowY: "auto" }}>
+                {assignedMsIds.map((msId) => {
+                  const ms = milestones.find((m) => m.id === msId);
+                  if (!ms) return null;
+                  const isChecked = selected.has(msId);
+                  return (
+                    <label key={msId} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 10px", background: "var(--c-bg)", borderRadius: "8px", border: `1px solid ${isChecked ? "var(--c-ok)" : "var(--c-border)"}`, cursor: "pointer" }}>
+                      <input type="checkbox" checked={isChecked} onChange={() => toggleMs(msId)} />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "13px", color: "var(--c-text)", fontWeight: "600" }}>{ms.name}</div>
+                        <div style={{ fontSize: "11px", color: "var(--c-text-3)" }}>{ms.date ? new Date(ms.date + "T00:00:00").toLocaleDateString() : "no date set"}</div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+                <button onClick={() => setMilestoneCompletePopup(null)} disabled={updating === item.id} style={{ padding: "7px 14px", background: "transparent", border: "1px solid var(--c-border)", color: "var(--c-text-2)", borderRadius: "6px", cursor: "pointer", fontSize: "13px" }}>
+                  Cancel
+                </button>
+                <button onClick={() => applyMilestoneCompletion(item, selected)} disabled={updating === item.id} style={{ padding: "7px 16px", background: "var(--c-accent)", color: "white", border: "none", borderRadius: "6px", cursor: updating === item.id ? "not-allowed" : "pointer", fontSize: "13px", fontWeight: "600" }}>
+                  {updating === item.id ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
