@@ -15,6 +15,8 @@ export default function OrgDashboard({ session, org }) {
   const [milestoneChartData, setMilestoneChartData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
+  const [milestoneView, setMilestoneView] = useState("list"); // list | calendar
+  const [calMonth, setCalMonth] = useState(() => { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d; });
 
   useEffect(() => { fetchAll(); }, [org.id]);
 
@@ -51,14 +53,14 @@ export default function OrgDashboard({ session, org }) {
     setCategoryStats(catMap);
 
     const today = new Date().toISOString().split("T")[0];
-    // Upcoming milestones panel
+    // Upcoming milestones panel — fetched without a hard cap so the calendar view
+    // (which can span several months forward) has full data; list view shows the first 10.
     const { data: ms } = await supabase
       .from("project_milestones")
       .select("*, project:projects(name)")
       .in("project_id", ids)
       .gte("date", today)
-      .order("date")
-      .limit(10);
+      .order("date");
     setMilestones(ms || []);
 
     // Active milestone completion chart
@@ -214,25 +216,111 @@ export default function OrgDashboard({ session, org }) {
           {/* Upcoming milestones */}
           {milestones.length > 0 && (
             <div style={{ background: "var(--c-surface)", border: "1px solid #334155", borderRadius: "12px", padding: isMobile ? "16px" : "24px", marginBottom: "24px" }}>
-              <h3 style={{ color: "var(--c-text)", margin: "0 0 16px", fontSize: "15px", fontWeight: "600" }}>Upcoming Milestones</h3>
-              <div style={{ display: "grid", gap: "8px" }}>
-                {milestones.map((m) => {
-                  const daysUntil = Math.ceil((new Date(m.date + "T00:00:00") - new Date()) / 86400000);
-                  const isAlert = daysUntil <= m.days_before_alert;
-                  return (
-                    <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--c-bg)", borderRadius: "8px", border: `1px solid ${isAlert ? "var(--c-warn)" : "var(--c-border)"}`, flexWrap: "wrap", gap: "6px" }}>
-                      <div>
-                        <span style={{ color: "var(--c-text)", fontSize: "14px", fontWeight: "600" }}>{m.name}</span>
-                        <span style={{ color: "var(--c-text-3)", fontSize: "12px", marginLeft: "10px" }}>{m.project?.name}</span>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "10px" }}>
+                <h3 style={{ color: "var(--c-text)", margin: 0, fontSize: "15px", fontWeight: "600" }}>Upcoming Milestones</h3>
+                <div style={{ display: "flex", background: "var(--c-bg)", border: "1px solid var(--c-border)", borderRadius: "8px", padding: "2px" }}>
+                  {["list", "calendar"].map((v) => (
+                    <button key={v} onClick={() => setMilestoneView(v)} style={{
+                      padding: "5px 12px", border: "none", borderRadius: "6px", fontSize: "12px", fontWeight: "600",
+                      cursor: "pointer", textTransform: "capitalize",
+                      background: milestoneView === v ? "var(--c-accent)" : "transparent",
+                      color: milestoneView === v ? "white" : "var(--c-text-2)",
+                    }}>
+                      {v === "list" ? "☰ List" : "📅 Calendar"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {milestoneView === "list" ? (
+                <div style={{ display: "grid", gap: "8px" }}>
+                  {milestones.slice(0, 10).map((m) => {
+                    const daysUntil = Math.ceil((new Date(m.date + "T00:00:00") - new Date()) / 86400000);
+                    const isAlert = daysUntil <= m.days_before_alert;
+                    return (
+                      <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--c-bg)", borderRadius: "8px", border: `1px solid ${isAlert ? "var(--c-warn)" : "var(--c-border)"}`, flexWrap: "wrap", gap: "6px" }}>
+                        <div>
+                          <span style={{ color: "var(--c-text)", fontSize: "14px", fontWeight: "600" }}>{m.name}</span>
+                          <span style={{ color: "var(--c-text-3)", fontSize: "12px", marginLeft: "10px" }}>{m.project?.name}</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          {isAlert && <span style={{ fontSize: "11px", color: "var(--c-warn)", background: "var(--c-warn-bg)", padding: "2px 8px", borderRadius: "20px" }}>⚠ {daysUntil}d</span>}
+                          <span style={{ color: "var(--c-text-2)", fontSize: "13px" }}>{new Date(m.date + "T00:00:00").toLocaleDateString()}</span>
+                        </div>
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        {isAlert && <span style={{ fontSize: "11px", color: "var(--c-warn)", background: "var(--c-warn-bg)", padding: "2px 8px", borderRadius: "20px" }}>⚠ {daysUntil}d</span>}
-                        <span style={{ color: "var(--c-text-2)", fontSize: "13px" }}>{new Date(m.date + "T00:00:00").toLocaleDateString()}</span>
+                    );
+                  })}
+                </div>
+              ) : (
+                (() => {
+                  const year = calMonth.getFullYear();
+                  const month = calMonth.getMonth();
+                  const firstOfMonth = new Date(year, month, 1);
+                  const startDay = firstOfMonth.getDay(); // 0 = Sun
+                  const daysInMonth = new Date(year, month + 1, 0).getDate();
+                  const today = new Date(); today.setHours(0, 0, 0, 0);
+                  const msByDate = {};
+                  milestones.forEach((m) => {
+                    if (!msByDate[m.date]) msByDate[m.date] = [];
+                    msByDate[m.date].push(m);
+                  });
+                  const toDateKey = (d) => {
+                    const yy = d.getFullYear(), mm = String(d.getMonth() + 1).padStart(2, "0"), dd = String(d.getDate()).padStart(2, "0");
+                    return `${yy}-${mm}-${dd}`;
+                  };
+                  const cells = [];
+                  for (let i = 0; i < startDay; i++) cells.push(null);
+                  for (let day = 1; day <= daysInMonth; day++) cells.push(day);
+
+                  return (
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
+                        <button onClick={() => setCalMonth(new Date(year, month - 1, 1))} style={{ background: "transparent", border: "1px solid var(--c-border)", color: "var(--c-text-2)", borderRadius: "6px", padding: "4px 10px", cursor: "pointer", fontSize: "13px" }}>‹</button>
+                        <span style={{ color: "var(--c-text)", fontSize: "14px", fontWeight: "600" }}>
+                          {firstOfMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
+                        </span>
+                        <button onClick={() => setCalMonth(new Date(year, month + 1, 1))} style={{ background: "transparent", border: "1px solid var(--c-border)", color: "var(--c-text-2)", borderRadius: "6px", padding: "4px 10px", cursor: "pointer", fontSize: "13px" }}>›</button>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "4px", marginBottom: "4px" }}>
+                        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+                          <div key={d} style={{ textAlign: "center", fontSize: "11px", color: "var(--c-text-3)", fontWeight: "600", padding: "4px 0" }}>{d}</div>
+                        ))}
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "4px" }}>
+                        {cells.map((day, idx) => {
+                          if (day === null) return <div key={`empty-${idx}`} />;
+                          const cellDate = new Date(year, month, day);
+                          const dateKey = toDateKey(cellDate);
+                          const dayMs = msByDate[dateKey] || [];
+                          const isToday = toDateKey(today) === dateKey;
+                          return (
+                            <div key={dateKey} style={{
+                              minHeight: isMobile ? "56px" : "72px", padding: "4px", borderRadius: "6px",
+                              background: isToday ? "var(--c-accent-dk)" : "var(--c-bg)",
+                              border: `1px solid ${isToday ? "var(--c-accent)" : "var(--c-border)"}`,
+                              display: "flex", flexDirection: "column", gap: "2px", overflow: "hidden",
+                            }}>
+                              <span style={{ fontSize: "11px", color: isToday ? "var(--c-accent-lt)" : "var(--c-text-3)", fontWeight: isToday ? "700" : "400" }}>{day}</span>
+                              {dayMs.slice(0, isMobile ? 1 : 2).map((m) => (
+                                <span key={m.id} title={`${m.name} — ${m.project?.name}`} style={{
+                                  fontSize: "9px", fontWeight: "600", color: "var(--c-warn)", background: "var(--c-warn-bg)",
+                                  border: "1px solid var(--c-warn)", borderRadius: "3px", padding: "1px 4px",
+                                  whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                }}>
+                                  {m.name}
+                                </span>
+                              ))}
+                              {dayMs.length > (isMobile ? 1 : 2) && (
+                                <span style={{ fontSize: "9px", color: "var(--c-text-3)" }}>+{dayMs.length - (isMobile ? 1 : 2)} more</span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   );
-                })}
-              </div>
+                })()
+              )}
             </div>
           )}
 
