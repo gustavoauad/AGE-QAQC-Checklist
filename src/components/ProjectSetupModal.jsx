@@ -74,6 +74,15 @@ function ChecklistsTab({ project, userRole }) {
   const [depsPickerSearch, setDepsPickerSearch] = useState("");
   // itemMilestoneDays: { [itemId]: { [milestoneId]: number } }
   const [itemMilestoneDays, setItemMilestoneDays] = useState({});
+  // catMilestoneDefaults: { [catId]: { [milestoneId]: number } } — checklist-wide default
+  // days_before, applied automatically when an item is later assigned to that milestone.
+  const [catMilestoneDefaults, setCatMilestoneDefaults] = useState({});
+  // tooltipEditing: itemId currently being edited; tooltipDraft: its in-progress text
+  const [tooltipEditing, setTooltipEditing] = useState(null);
+  const [tooltipDraft, setTooltipDraft] = useState("");
+  // abbrEditing: catId currently being edited; abbrDraft: its in-progress text
+  const [abbrEditing, setAbbrEditing] = useState(null);
+  const [abbrDraft, setAbbrDraft] = useState("");
 
   useEffect(() => { loadAll(); }, []);
 
@@ -86,7 +95,7 @@ function ChecklistsTab({ project, userRole }) {
       supabase.from("project_milestones").select("*").eq("project_id", project.id).order("date"),
     ]);
     const cfgMap = {};
-    (cfgRes.data || []).forEach((r) => { cfgMap[r.category] = { enabled: r.enabled, label: r.label, is_custom: r.is_custom }; });
+    (cfgRes.data || []).forEach((r) => { cfgMap[r.category] = { enabled: r.enabled, label: r.label, is_custom: r.is_custom, abbreviation: r.abbreviation }; });
     setConfig(cfgMap);
     const itemMap = {};
     (itemsRes.data || []).forEach((row) => {
@@ -117,6 +126,16 @@ function ChecklistsTab({ project, userRole }) {
       });
       setItemMilestones(imMap);
       setItemMilestoneDays(imdMap);
+
+      const { data: defData } = await supabase.from("project_checklist_milestone_defaults")
+        .select("category, milestone_id, days_before")
+        .in("milestone_id", msIds);
+      const defMap = {};
+      (defData || []).forEach(({ category, milestone_id, days_before }) => {
+        if (!defMap[category]) defMap[category] = {};
+        if (days_before != null) defMap[category][milestone_id] = days_before;
+      });
+      setCatMilestoneDefaults(defMap);
     }
     // Load item dependencies
     const allItemIds = Object.values(itemMap).flat().map((i) => i.id);
@@ -141,6 +160,13 @@ function ChecklistsTab({ project, userRole }) {
     .map(([key, val]) => ({ id: key, label: val.label, isCustom: true }));
   const allCats = [...CATEGORIES.map((c) => ({ ...c, isCustom: false })), ...customCats];
   const getLabel = (cat) => config[cat.id]?.label || cat.label;
+  // Custom abbreviation overrides the auto-derived 4-char prefix; user's own input
+  // is trusted verbatim (just sanitized/uppercased), not force-truncated to 4 chars.
+  const getAbbr = (cat) => {
+    const custom = config[cat.id]?.abbreviation?.trim();
+    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 10);
+    return getLabel(cat).replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
+  };
   const mBtn = (extra = {}) => ({ padding: "3px 7px", background: "transparent", border: "1px solid #334155", color: "var(--c-text-3)", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontFamily: "Manrope, sans-serif", ...extra });
 
   // Reference codes: itemId → "PREFIX-S.I"
@@ -148,8 +174,7 @@ function ChecklistsTab({ project, userRole }) {
     const codes = {};
     allCats.forEach((cat) => {
       if (config[cat.id]?.enabled === false) return;
-      const label = getLabel(cat);
-      const prefix = label.replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
+      const prefix = getAbbr(cat);
       const catItems = [...(items[cat.id] || [])]
         .sort((a, b) => (a.sort_order ?? 9999) - (b.sort_order ?? 9999) || a.item_id.localeCompare(b.item_id));
       const seenSections = [];
@@ -185,6 +210,16 @@ function ChecklistsTab({ project, userRole }) {
     setRenamingCat(null);
   };
 
+  const saveAbbr = async (catId) => {
+    const val = abbrDraft.trim();
+    await supabase.from("project_checklist_config").upsert(
+      { project_id: project.id, category: catId, abbreviation: val || null, label: config[catId]?.label || null, enabled: config[catId]?.enabled !== false },
+      { onConflict: "project_id,category" }
+    );
+    setConfig((p) => ({ ...p, [catId]: { ...p[catId], abbreviation: val || null } }));
+    setAbbrEditing(null);
+  };
+
   const addCustomCategory = async () => {
     if (!newCatName.trim()) return;
     setSavingCat(true);
@@ -213,6 +248,13 @@ function ChecklistsTab({ project, userRole }) {
     await supabase.from("checklists").update({ item_text: editItemText.trim(), edited_by_pm: true }).eq("id", item.id);
     setItems((p) => ({ ...p, [item.category]: p[item.category].map((i) => i.id === item.id ? { ...i, item_text: editItemText.trim(), edited_by_pm: true } : i) }));
     setEditingItemId(null);
+  };
+
+  const saveTooltip = async (item) => {
+    const val = tooltipDraft.trim() || null;
+    await supabase.from("checklists").update({ help_text: val }).eq("id", item.id);
+    setItems((p) => ({ ...p, [item.category]: p[item.category].map((i) => i.id === item.id ? { ...i, help_text: val } : i) }));
+    setTooltipEditing(null);
   };
 
   const saveMilestoneDays = async (itemIds, milestoneId, daysStr) => {
@@ -276,7 +318,13 @@ function ChecklistsTab({ project, userRole }) {
     const msInputs = {};
     milestones.forEach((m) => {
       const assignedItems = scopeItems.filter((i) => itemMilestones[i.id]?.has(m.id));
-      if (assignedItems.length === 0) { msInputs[m.id] = ""; return; }
+      if (assignedItems.length === 0) {
+        // Nothing assigned yet — for the checklist-wide (cat) scope, show the stored
+        // default (if any) so it's clear what future assignments will inherit.
+        const def = type === "cat" ? catMilestoneDefaults[catId]?.[m.id] : null;
+        msInputs[m.id] = def != null ? String(def) : "";
+        return;
+      }
       const vals = assignedItems.map((i) => itemMilestoneDays[i.id]?.[m.id]).filter((v) => v != null);
       const uniq = [...new Set(vals)];
       msInputs[m.id] = uniq.length === 1 ? String(uniq[0]) : "";
@@ -291,6 +339,33 @@ function ChecklistsTab({ project, userRole }) {
     await Promise.all(
       Object.entries(msInputs).map(([msId, val]) => saveMilestoneDays(scopeItems.map((i) => i.id), msId, val))
     );
+    // Checklist-wide (cat) scope also persists a default per milestone, so items
+    // assigned to that milestone later — even ones with no items on it today —
+    // inherit this days_before instead of starting with no deadline.
+    if (type === "cat") {
+      await Promise.all(Object.entries(msInputs).map(async ([msId, val]) => {
+        const days = val === "" ? null : parseInt(val, 10);
+        if (val !== "" && (isNaN(days) || days < 0)) return;
+        if (days == null) {
+          await supabase.from("project_checklist_milestone_defaults").delete()
+            .eq("category", catId).eq("milestone_id", msId);
+        } else {
+          await supabase.from("project_checklist_milestone_defaults").upsert(
+            { project_id: project.id, category: catId, milestone_id: msId, days_before: days },
+            { onConflict: "category,milestone_id" }
+          );
+        }
+      }));
+      setCatMilestoneDefaults((prev) => {
+        const next = { ...prev, [catId]: { ...(prev[catId] || {}) } };
+        Object.entries(msInputs).forEach(([msId, val]) => {
+          const days = val === "" ? null : parseInt(val, 10);
+          if (days == null) delete next[catId][msId];
+          else next[catId][msId] = days;
+        });
+        return next;
+      });
+    }
     setDaysPopover(null);
   };
 
@@ -344,7 +419,7 @@ function ChecklistsTab({ project, userRole }) {
     setSections((p) => ({ ...p, [catId]: (p[catId] || []).filter((s) => s !== label) }));
   };
 
-  const toggleItemMilestone = async (itemId, milestoneId, add) => {
+  const toggleItemMilestone = async (itemId, milestoneId, add, catId) => {
     // Optimistic state update
     setItemMilestones((prev) => {
       const next = { ...prev };
@@ -353,8 +428,9 @@ function ChecklistsTab({ project, userRole }) {
       return next;
     });
     if (add) {
+      const defDays = catId ? catMilestoneDefaults[catId]?.[milestoneId] : null;
       const { error } = await supabase.from("milestone_items")
-        .upsert({ milestone_id: milestoneId, checklist_item_id: itemId }, { onConflict: "milestone_id,checklist_item_id" });
+        .upsert({ milestone_id: milestoneId, checklist_item_id: itemId, days_before: defDays ?? null }, { onConflict: "milestone_id,checklist_item_id" });
       if (error) {
         console.error("milestone_items insert failed:", error);
         // Revert optimistic update
@@ -364,6 +440,8 @@ function ChecklistsTab({ project, userRole }) {
           next[itemId].delete(milestoneId);
           return next;
         });
+      } else if (defDays != null) {
+        setItemMilestoneDays((prev) => ({ ...prev, [itemId]: { ...(prev[itemId] || {}), [milestoneId]: defDays } }));
       }
     } else {
       const { error } = await supabase.from("milestone_items").delete()
@@ -381,7 +459,7 @@ function ChecklistsTab({ project, userRole }) {
     }
   };
 
-  const bulkToggleMilestone = async (itemIds, milestoneId, add) => {
+  const bulkToggleMilestone = async (itemIds, milestoneId, add, catId) => {
     // Determine which items actually need to change
     const toChange = itemIds.filter((id) => {
       const has = itemMilestones[id]?.has(milestoneId) ?? false;
@@ -401,11 +479,19 @@ function ChecklistsTab({ project, userRole }) {
 
     // Single batched DB call
     if (add) {
+      const defDays = catId ? catMilestoneDefaults[catId]?.[milestoneId] : null;
       const { error } = await supabase.from("milestone_items").upsert(
-        toChange.map((id) => ({ milestone_id: milestoneId, checklist_item_id: id })),
+        toChange.map((id) => ({ milestone_id: milestoneId, checklist_item_id: id, days_before: defDays ?? null })),
         { onConflict: "milestone_id,checklist_item_id" }
       );
       if (error) console.error("bulk milestone insert failed:", error);
+      else if (defDays != null) {
+        setItemMilestoneDays((prev) => {
+          const next = { ...prev };
+          toChange.forEach((id) => { next[id] = { ...(next[id] || {}), [milestoneId]: defDays }; });
+          return next;
+        });
+      }
     } else {
       const { error } = await supabase.from("milestone_items").delete()
         .eq("milestone_id", milestoneId).in("checklist_item_id", toChange);
@@ -567,7 +653,7 @@ function ChecklistsTab({ project, userRole }) {
                           const allItemIds = catItems.map((i) => i.id);
                           const isActive = allItemIds.length > 0 && allItemIds.every((id) => itemMilestones[id]?.has(m.id));
                           return (
-                            <button key={m.id} onClick={(e) => { e.stopPropagation(); bulkToggleMilestone(allItemIds, m.id, !isActive); }}
+                            <button key={m.id} onClick={(e) => { e.stopPropagation(); bulkToggleMilestone(allItemIds, m.id, !isActive, cat.id); }}
                               style={{ padding: "2px 8px", border: `1px solid ${isActive ? "var(--c-accent)" : "var(--c-border)"}`, borderRadius: "20px", fontSize: "10px", fontWeight: "600", cursor: "pointer", background: isActive ? "var(--c-accent-dk)" : "transparent", color: isActive ? "var(--c-accent-lt)" : "var(--c-text-4)", whiteSpace: "nowrap" }}>
                               {m.name}
                             </button>
@@ -575,37 +661,23 @@ function ChecklistsTab({ project, userRole }) {
                         })}
                       </div>
                     )}
+                    {abbrEditing === cat.id ? (
+                      <div style={{ display: "flex", gap: "4px", alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
+                        <input autoFocus value={abbrDraft} onChange={(e) => setAbbrDraft(e.target.value)}
+                          placeholder={getAbbr(cat)} maxLength={10}
+                          onKeyDown={(e) => { if (e.key === "Enter") saveAbbr(cat.id); if (e.key === "Escape") setAbbrEditing(null); }}
+                          style={{ width: "70px", padding: "3px 6px", background: "var(--c-surface)", border: "1px solid #0095da", borderRadius: "4px", color: "var(--c-text)", fontSize: "11px", textTransform: "uppercase" }}
+                        />
+                        <button onClick={() => saveAbbr(cat.id)} style={mBtn({ background: "var(--c-accent)", color: "white", border: "none" })}>Save</button>
+                        <button onClick={() => setAbbrEditing(null)} style={mBtn()}>x</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => { setAbbrEditing(cat.id); setAbbrDraft(config[cat.id]?.abbreviation || ""); }} title="Customize reference-code abbreviation" style={mBtn()}>Abbr: {getAbbr(cat)}</button>
+                    )}
                     <button onClick={() => { setRenamingCat(cat.id); setRenameCatText(getLabel(cat)); }} style={mBtn()}>Rename</button>
                     {cat.isCustom && <button onClick={() => deleteCustomCat(cat.id)} style={mBtn({ color: "var(--c-err)" })}>x</button>}
                     {milestones.length > 0 && (() => {
-                      const isOpen = daysPopover?.type === "cat" && daysPopover?.catId === cat.id;
-                      const hasAny = catItems.some((i) => Object.keys(itemMilestoneDays[i.id] || {}).length > 0);
-                      if (isOpen) return (
-                        <div style={{ position: "relative" }}>
-                          <div style={{ position: "absolute", right: 0, top: "100%", marginTop: "4px", zIndex: 20, background: "var(--c-bg)", border: "1px solid var(--c-accent)", borderRadius: "10px", padding: "12px 14px", minWidth: "220px", boxShadow: "0 4px 20px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
-                            <div style={{ fontSize: "11px", fontWeight: "700", color: "var(--c-text-2)", marginBottom: "10px", textTransform: "uppercase", letterSpacing: "0.06em" }}>Days before milestone — all items</div>
-                            {milestones.map((m) => (
-                              <div key={m.id} style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "7px" }}>
-                                <span style={{ flex: 1, fontSize: "12px", color: "var(--c-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
-                                <input type="number" min="0" placeholder="—" value={daysPopover.msInputs[m.id] ?? ""}
-                                  onChange={(e) => setDaysPopover((p) => ({ ...p, msInputs: { ...p.msInputs, [m.id]: e.target.value } }))}
-                                  onKeyDown={(e) => { if (e.key === "Enter") applyDaysPopover(); if (e.key === "Escape") setDaysPopover(null); }}
-                                  style={{ width: "52px", padding: "4px 6px", background: "var(--c-surface)", border: "1px solid #334155", borderRadius: "5px", color: "var(--c-text)", fontSize: "12px", textAlign: "center" }}
-                                />
-                                <span style={{ fontSize: "11px", color: "var(--c-text-4)" }}>d</span>
-                              </div>
-                            ))}
-                            <div style={{ display: "flex", gap: "6px", marginTop: "10px", justifyContent: "flex-end" }}>
-                              <button onClick={() => setDaysPopover(null)} style={{ padding: "4px 10px", background: "transparent", border: "1px solid #334155", color: "var(--c-text-3)", borderRadius: "5px", cursor: "pointer", fontSize: "11px" }}>Cancel</button>
-                              <button onClick={applyDaysPopover} style={{ padding: "4px 12px", background: "var(--c-accent)", color: "white", border: "none", borderRadius: "5px", cursor: "pointer", fontSize: "11px", fontWeight: "600" }}>Apply to all</button>
-                            </div>
-                          </div>
-                          <button onClick={(e) => { e.stopPropagation(); openDaysPopover("cat", cat.id); }}
-                            style={{ padding: "2px 7px", border: `1px solid var(--c-accent)`, borderRadius: "20px", fontSize: "10px", fontWeight: "600", cursor: "pointer", background: "var(--c-accent-dk)", color: "var(--c-accent-lt)", whiteSpace: "nowrap" }}>
-                            📅 days
-                          </button>
-                        </div>
-                      );
+                      const hasAny = catItems.some((i) => Object.keys(itemMilestoneDays[i.id] || {}).length > 0) || Object.keys(catMilestoneDefaults[cat.id] || {}).length > 0;
                       return (
                         <button onClick={(e) => { e.stopPropagation(); openDaysPopover("cat", cat.id); }}
                           style={{ padding: "2px 7px", border: `1px solid ${hasAny ? "var(--c-accent)" : "var(--c-border)"}`, borderRadius: "20px", fontSize: "10px", fontWeight: "600", cursor: "pointer", background: hasAny ? "var(--c-accent-dk)" : "transparent", color: hasAny ? "var(--c-accent-lt)" : "var(--c-text-4)", whiteSpace: "nowrap" }}>
@@ -658,7 +730,7 @@ function ChecklistsTab({ project, userRole }) {
                                     {milestones.map((m) => {
                                       const isActive = secItemIds.length > 0 && secItemIds.every((id) => itemMilestones[id]?.has(m.id));
                                       return (
-                                        <button key={m.id} onClick={(e) => { e.stopPropagation(); bulkToggleMilestone(secItemIds, m.id, !isActive); }}
+                                        <button key={m.id} onClick={(e) => { e.stopPropagation(); bulkToggleMilestone(secItemIds, m.id, !isActive, cat.id); }}
                                           style={{ padding: "2px 7px", border: `1px solid ${isActive ? "var(--c-accent)" : "var(--c-border)"}`, borderRadius: "20px", fontSize: "10px", fontWeight: "600", cursor: "pointer", background: isActive ? "var(--c-accent-dk)" : "transparent", color: isActive ? "var(--c-accent-lt)" : "var(--c-text-4)", whiteSpace: "nowrap" }}>
                                           {m.name}
                                         </button>
@@ -671,34 +743,7 @@ function ChecklistsTab({ project, userRole }) {
                                 <div style={{ display: "flex", gap: "3px", flexShrink: 0, alignItems: "center" }}>
                                   {milestones.length > 0 && (() => {
                                     const secItems = catItems.filter((i) => i.sub_section === sLabel);
-                                    const isOpen = daysPopover?.type === "section" && daysPopover?.catId === cat.id && daysPopover?.sectionLabel === sLabel;
                                     const hasAny = secItems.some((i) => Object.keys(itemMilestoneDays[i.id] || {}).length > 0);
-                                    if (isOpen) return (
-                                      <div style={{ position: "relative" }}>
-                                        <div style={{ position: "absolute", right: 0, top: "100%", marginTop: "4px", zIndex: 20, background: "var(--c-bg)", border: "1px solid var(--c-accent)", borderRadius: "10px", padding: "12px 14px", minWidth: "220px", boxShadow: "0 4px 20px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
-                                          <div style={{ fontSize: "11px", fontWeight: "700", color: "var(--c-text-2)", marginBottom: "10px", textTransform: "uppercase", letterSpacing: "0.06em" }}>Days before milestone — "{sLabel}"</div>
-                                          {milestones.map((m) => (
-                                            <div key={m.id} style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "7px" }}>
-                                              <span style={{ flex: 1, fontSize: "12px", color: "var(--c-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
-                                              <input type="number" min="0" placeholder="—" value={daysPopover.msInputs[m.id] ?? ""}
-                                                onChange={(e) => setDaysPopover((p) => ({ ...p, msInputs: { ...p.msInputs, [m.id]: e.target.value } }))}
-                                                onKeyDown={(e) => { if (e.key === "Enter") applyDaysPopover(); if (e.key === "Escape") setDaysPopover(null); }}
-                                                style={{ width: "52px", padding: "4px 6px", background: "var(--c-surface)", border: "1px solid #334155", borderRadius: "5px", color: "var(--c-text)", fontSize: "12px", textAlign: "center" }}
-                                              />
-                                              <span style={{ fontSize: "11px", color: "var(--c-text-4)" }}>d</span>
-                                            </div>
-                                          ))}
-                                          <div style={{ display: "flex", gap: "6px", marginTop: "10px", justifyContent: "flex-end" }}>
-                                            <button onClick={() => setDaysPopover(null)} style={{ padding: "4px 10px", background: "transparent", border: "1px solid #334155", color: "var(--c-text-3)", borderRadius: "5px", cursor: "pointer", fontSize: "11px" }}>Cancel</button>
-                                            <button onClick={applyDaysPopover} style={{ padding: "4px 12px", background: "var(--c-accent)", color: "white", border: "none", borderRadius: "5px", cursor: "pointer", fontSize: "11px", fontWeight: "600" }}>Apply to section</button>
-                                          </div>
-                                        </div>
-                                        <button onClick={(e) => { e.stopPropagation(); openDaysPopover("section", cat.id, sLabel); }}
-                                          style={{ padding: "2px 7px", border: "1px solid var(--c-accent)", borderRadius: "20px", fontSize: "10px", fontWeight: "600", cursor: "pointer", background: "var(--c-accent-dk)", color: "var(--c-accent-lt)", whiteSpace: "nowrap" }}>
-                                          📅 days
-                                        </button>
-                                      </div>
-                                    );
                                     return (
                                       <button onClick={(e) => { e.stopPropagation(); openDaysPopover("section", cat.id, sLabel); }}
                                         style={{ padding: "2px 7px", border: `1px solid ${hasAny ? "var(--c-accent)" : "var(--c-border)"}`, borderRadius: "20px", fontSize: "10px", fontWeight: "600", cursor: "pointer", background: hasAny ? "var(--c-accent-dk)" : "transparent", color: hasAny ? "var(--c-accent-lt)" : "var(--c-text-4)", whiteSpace: "nowrap" }}>
@@ -755,7 +800,7 @@ function ChecklistsTab({ project, userRole }) {
                                       const isEditingD = editingDays?.itemId === item.id && editingDays?.milestoneId === m.id;
                                       return (
                                         <div key={m.id} style={{ display: "flex", alignItems: "center", gap: "1px" }}>
-                                          <button onClick={(e) => { e.stopPropagation(); if (canEdit) toggleItemMilestone(item.id, m.id, !isActive); }}
+                                          <button onClick={(e) => { e.stopPropagation(); if (canEdit) toggleItemMilestone(item.id, m.id, !isActive, cat.id); }}
                                             disabled={!canEdit}
                                             style={{ padding: "1px 6px", border: `1px solid ${isActive ? "var(--c-accent)" : "var(--c-border)"}`, borderRadius: isActive ? "20px 0 0 20px" : "20px", fontSize: "9px", fontWeight: "600", cursor: canEdit ? "pointer" : "default", background: isActive ? "var(--c-accent-dk)" : "transparent", color: isActive ? "var(--c-accent-lt)" : "var(--c-text-4)", whiteSpace: "nowrap" }}>
                                             {m.name}
@@ -836,6 +881,11 @@ function ChecklistsTab({ project, userRole }) {
                                 })()}
                                 {canEdit && (
                                   <div style={{ display: "flex", gap: "3px", flexShrink: 0 }}>
+                                    <button onClick={() => { setTooltipEditing(item.id); setTooltipDraft(item.help_text || ""); }}
+                                      title={item.help_text ? "Edit tooltip" : "Add tooltip"}
+                                      style={mBtn({ color: item.help_text ? "var(--c-accent-lt)" : "var(--c-text-4)", borderColor: item.help_text ? "var(--c-accent)" : "#334155" })}>
+                                      ⓘ
+                                    </button>
                                     {editingItemId === item.id
                                       ? <><button onClick={() => saveItemEdit(item)} style={mBtn({ background: "var(--c-accent)", color: "white", border: "none" })}>Save</button><button onClick={() => setEditingItemId(null)} style={mBtn()}>x</button></>
                                       : <><button onClick={() => { setEditingItemId(item.id); setEditItemText(item.item_text); }} style={mBtn()}>Edit</button><button onClick={() => removeItem(item)} style={mBtn({ color: "var(--c-err)" })}>x</button></>
@@ -921,7 +971,7 @@ function ChecklistsTab({ project, userRole }) {
                                           const isEditingD = editingDays?.itemId === item.id && editingDays?.milestoneId === m.id;
                                           return (
                                             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: "1px" }}>
-                                              <button onClick={(e) => { e.stopPropagation(); if (canEdit) toggleItemMilestone(item.id, m.id, !isActive); }}
+                                              <button onClick={(e) => { e.stopPropagation(); if (canEdit) toggleItemMilestone(item.id, m.id, !isActive, cat.id); }}
                                                 disabled={!canEdit}
                                                 style={{ padding: "1px 6px", border: `1px solid ${isActive ? "var(--c-accent)" : "var(--c-border)"}`, borderRadius: isActive ? "20px 0 0 20px" : "20px", fontSize: "9px", fontWeight: "600", cursor: canEdit ? "pointer" : "default", background: isActive ? "var(--c-accent-dk)" : "transparent", color: isActive ? "var(--c-accent-lt)" : "var(--c-text-4)", whiteSpace: "nowrap" }}>
                                                 {m.name}
@@ -1063,6 +1113,67 @@ function ChecklistsTab({ project, userRole }) {
           );
         })}
       </div>
+
+      {/* Days-before-milestone picker — rendered as a fixed overlay (not an anchored
+          absolute dropdown) so it's never clipped by a collapsed/expanded checklist
+          card's overflow:hidden, regardless of scroll position. */}
+      {daysPopover && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: "16px" }}
+          onClick={() => setDaysPopover(null)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "var(--c-bg)", border: "1px solid var(--c-accent)", borderRadius: "10px", padding: "16px 18px", minWidth: "260px", maxWidth: "92vw", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>
+            <div style={{ fontSize: "12px", fontWeight: "700", color: "var(--c-text-2)", marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              Days before milestone — {daysPopover.type === "section" ? `"${daysPopover.sectionLabel}"` : "all items"}
+            </div>
+            {milestones.map((m) => (
+              <div key={m.id} style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+                <span style={{ flex: 1, fontSize: "13px", color: "var(--c-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
+                <input autoFocus={milestones[0]?.id === m.id} type="number" min="0" placeholder="—" value={daysPopover.msInputs[m.id] ?? ""}
+                  onChange={(e) => setDaysPopover((p) => ({ ...p, msInputs: { ...p.msInputs, [m.id]: e.target.value } }))}
+                  onKeyDown={(e) => { if (e.key === "Enter") applyDaysPopover(); if (e.key === "Escape") setDaysPopover(null); }}
+                  style={{ width: "60px", padding: "5px 7px", background: "var(--c-surface)", border: "1px solid #334155", borderRadius: "5px", color: "var(--c-text)", fontSize: "13px", textAlign: "center" }}
+                />
+                <span style={{ fontSize: "12px", color: "var(--c-text-4)" }}>d</span>
+              </div>
+            ))}
+            {daysPopover.type === "cat" && (
+              <p style={{ fontSize: "11px", color: "var(--c-text-4)", margin: "4px 0 0", lineHeight: 1.4 }}>
+                Also saved as this checklist's default — items assigned to a milestone later will inherit it automatically.
+              </p>
+            )}
+            <div style={{ display: "flex", gap: "8px", marginTop: "14px", justifyContent: "flex-end" }}>
+              <button onClick={() => setDaysPopover(null)} style={{ padding: "6px 12px", background: "transparent", border: "1px solid #334155", color: "var(--c-text-3)", borderRadius: "6px", cursor: "pointer", fontSize: "12px" }}>Cancel</button>
+              <button onClick={applyDaysPopover} style={{ padding: "6px 14px", background: "var(--c-accent)", color: "white", border: "none", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontWeight: "600" }}>
+                {daysPopover.type === "section" ? "Apply to section" : "Apply to all"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Item tooltip (help_text) editor */}
+      {tooltipEditing && (() => {
+        const item = Object.values(items).flat().find((i) => i.id === tooltipEditing);
+        if (!item) return null;
+        return (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: "16px" }}
+            onClick={() => setTooltipEditing(null)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "var(--c-bg)", border: "1px solid var(--c-accent)", borderRadius: "10px", padding: "16px 18px", width: "420px", maxWidth: "92vw", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>
+              <div style={{ fontSize: "12px", fontWeight: "700", color: "var(--c-text-2)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.06em" }}>Tooltip</div>
+              <p style={{ fontSize: "12px", color: "var(--c-text-3)", margin: "0 0 10px", lineHeight: 1.4 }}>{item.item_text}</p>
+              <textarea autoFocus value={tooltipDraft} onChange={(e) => setTooltipDraft(e.target.value)}
+                placeholder="Optional guidance shown to users on the ⓘ icon for this item…"
+                rows={4}
+                onKeyDown={(e) => { if (e.key === "Escape") setTooltipEditing(null); }}
+                style={{ width: "100%", padding: "8px 10px", background: "var(--c-surface)", border: "1px solid #334155", borderRadius: "6px", color: "var(--c-text)", fontSize: "13px", boxSizing: "border-box", resize: "vertical", fontFamily: "Manrope, sans-serif" }}
+              />
+              <div style={{ display: "flex", gap: "8px", marginTop: "12px", justifyContent: "flex-end" }}>
+                <button onClick={() => setTooltipEditing(null)} style={{ padding: "6px 12px", background: "transparent", border: "1px solid #334155", color: "var(--c-text-3)", borderRadius: "6px", cursor: "pointer", fontSize: "12px" }}>Cancel</button>
+                <button onClick={() => saveTooltip(item)} style={{ padding: "6px 14px", background: "var(--c-accent)", color: "white", border: "none", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontWeight: "600" }}>Save</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

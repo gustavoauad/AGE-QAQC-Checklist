@@ -17,7 +17,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const [commentsCache, setCommentsCache] = useState({});
   const [commentText, setCommentText] = useState("");
   const [addingComment, setAddingComment] = useState(false);
-  const [viewMode, setViewMode] = useState("category");
+  const [viewMode, setViewMode] = useState("dashboard");
   const [milestones, setMilestones] = useState([]);
   const [activeMilestoneId, setActiveMilestoneId] = useState(null);
   const [milestoneItemsCache, setMilestoneItemsCache] = useState({});
@@ -85,7 +85,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       setCommentMeta(meta);
     }
     const cfgMap = {};
-    (configRes.data || []).forEach((r) => { cfgMap[r.category] = { enabled: r.enabled, label: r.label }; });
+    (configRes.data || []).forEach((r) => { cfgMap[r.category] = { enabled: r.enabled, label: r.label, abbreviation: r.abbreviation }; });
     setCategoryConfig(cfgMap);
     const ms = milestoneRes.data || [];
     setMilestones(ms);
@@ -177,12 +177,19 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const getCatLabel = (catId) =>
     categoryConfig[catId]?.label || CATEGORIES.find((c) => c.id === catId)?.label || catId;
 
+  // Custom abbreviation (set by the PM in Project Setup) overrides the auto-derived
+  // 4-char prefix; kept in sync with the same logic in ProjectSetupModal.jsx.
+  const getCatAbbr = (catId) => {
+    const custom = categoryConfig[catId]?.abbreviation?.trim();
+    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 10);
+    return getCatLabel(catId).replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
+  };
+
   // Build reference codes: itemId → "PREFIX-S.I"
   const refCodes = (() => {
     const codes = {};
     enabledCategories.forEach((cat) => {
-      const label = getCatLabel(cat.id);
-      const prefix = label.replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
+      const prefix = getCatAbbr(cat.id);
       const catItems = [...checklists.filter((c) => c.category === cat.id)]
         .sort((a, b) => (a.sort_order ?? 9999) - (b.sort_order ?? 9999) || a.item_id.localeCompare(b.item_id));
       // Ordered unique sections
@@ -572,7 +579,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const getMilestoneStats = (milestoneId) => {
     const ids = milestoneItemsCache[milestoneId];
     if (!ids || ids.size === 0) return { done: 0, applicable: 0, pct: 0 };
-    const items = checklists.filter((c) => ids.has(c.id));
+    const items = enabledChecklists.filter((c) => ids.has(c.id));
     const done = items.filter((c) => c.status === "complete").length;
     const na = items.filter((c) => c.status === "na").length;
     const applicable = items.length - na;
@@ -581,10 +588,16 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
 
   const getMilestoneProgress = (milestoneId) => getMilestoneStats(milestoneId).pct;
 
-  const totalItems = checklists.length;
-  const completedItems = checklists.filter((c) => c.status === "complete").length;
-  const naItems = checklists.filter((c) => c.status === "na").length;
-  const pendingItems = checklists.filter((c) => c.status === "pending").length;
+  // Items whose checklist (category) has been turned off for this project must be
+  // completely excluded from counts, stats, and the "By Milestone" tab — not just
+  // hidden from the category sidebar.
+  const isCategoryEnabled = (catId) => categoryConfig[catId]?.enabled !== false;
+  const enabledChecklists = checklists.filter((c) => isCategoryEnabled(c.category));
+
+  const totalItems = enabledChecklists.length;
+  const completedItems = enabledChecklists.filter((c) => c.status === "complete").length;
+  const naItems = enabledChecklists.filter((c) => c.status === "na").length;
+  const pendingItems = enabledChecklists.filter((c) => c.status === "pending").length;
   const applicableItems = totalItems - naItems;
   const overallProgress = applicableItems ? Math.round((completedItems / applicableItems) * 100) : 0;
 
@@ -617,7 +630,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   }, {});
 
   const activeMilestoneItemIds = activeMilestoneId ? (milestoneItemsCache[activeMilestoneId] || null) : null;
-  const milestoneItems = activeMilestoneItemIds ? applyFilters(checklists.filter((c) => activeMilestoneItemIds.has(c.id))) : [];
+  const milestoneItems = activeMilestoneItemIds ? applyFilters(enabledChecklists.filter((c) => activeMilestoneItemIds.has(c.id))) : [];
   const groupedMilestoneItems = milestoneItems.reduce((acc, item) => {
     const catLabel = getCatLabel(item.category);
     const key = item.sub_section ? `${catLabel} — ${item.sub_section}` : catLabel;
@@ -824,7 +837,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   }
 
                   const isPast = info.daysLeft < 0;
-                  const isSoon = info.daysLeft >= 0 && info.daysLeft <= 7;
+                  const isSoon = info.daysLeft === 0;
                   const color = isPast ? "var(--c-err)" : isSoon ? "var(--c-warn)" : "var(--c-text-3)";
                   const bg = isPast ? "var(--c-err-bg)" : isSoon ? "var(--c-warn-bg)" : "transparent";
                   const border = isPast ? "#7f1d1d" : isSoon ? "var(--c-warn)" : "var(--c-border)";
@@ -1030,7 +1043,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         ))}
       </div>
 
-      {/* Filter bar */}
+      {/* Filter bar — not relevant to the dashboard overview */}
+      {viewMode !== "dashboard" && (
       <div style={{ background: "var(--c-bg)", borderBottom: "1px solid #243044", padding: isMobile ? "8px 12px" : "8px 20px", display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontSize: "11px", color: "var(--c-text-3)", fontWeight: "600", textTransform: "uppercase", letterSpacing: "0.05em", marginRight: "4px" }}>Filter:</span>
 
@@ -1096,6 +1110,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           </button>
         )}
       </div>
+      )}
 
       {/* Mobile: horizontal pill selector */}
       {isMobile && <MobilePills />}
@@ -1108,17 +1123,17 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           <div style={{ width: "220px", background: "var(--c-surface)", borderRight: "1px solid #334155", overflowY: "auto", padding: "12px" }}>
             {viewMode === "dashboard" ? (() => {
               const today = new Date(); today.setHours(0,0,0,0);
-              const inProgCount = checklists.filter((c) => c.status === "in_progress").length;
-              const withDue = checklists
+              const inProgCount = enabledChecklists.filter((c) => c.status === "in_progress").length;
+              const withDue = enabledChecklists
                 .filter((c) => c.status !== "complete" && c.status !== "na")
                 .map((c) => ({ id: c.id, dueDate: getItemDueDate(c) }))
                 .filter((c) => c.dueDate);
               const pastDueCount = withDue.filter((c) => c.dueDate < today).length;
-              const dueSoonCount = withDue.filter((c) => { const d = Math.ceil((c.dueDate - today) / 86400000); return d >= 0 && d <= 7; }).length;
+              const dueSoonCount = withDue.filter((c) => { const d = Math.ceil((c.dueDate - today) / 86400000); return d === 0; }).length;
               const sections = [
                 { label: "QA/QC Alerts",  icon: "🚩", count: qaqcThreads.length,  color: "var(--c-warn)" },
                 { label: "Past Due",       icon: "⚠",  count: pastDueCount,       color: "var(--c-err)" },
-                { label: "Due Soon",       icon: "⏰", count: dueSoonCount,       color: "var(--c-warn)" },
+                { label: "Due Today",      icon: "⏰", count: dueSoonCount,       color: "var(--c-warn)" },
                 { label: "In Progress",    icon: "▶",  count: inProgCount,        color: "var(--c-purple)" },
               ];
               return (
@@ -1162,7 +1177,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   if (c.category !== cat.id || c.status === "complete" || c.status === "na") return false;
                   const dd = getItemDueDate(c);
                   if (!dd) return false;
-                  return Math.ceil((dd - todayCat) / 86400000) <= 7;
+                  return Math.ceil((dd - todayCat) / 86400000) <= 0;
                 });
                 return (
                   <button key={cat.id} onClick={() => setActiveCategory(cat.id)} style={{
@@ -1174,7 +1189,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   }}>
                     <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cat.label}</span>
                     {catAlerts.length > 0 && !isActive && (
-                      <span title={`${catAlerts.length} item${catAlerts.length > 1 ? "s" : ""} due soon or overdue`}
+                      <span title={`${catAlerts.length} item${catAlerts.length > 1 ? "s" : ""} due today or overdue`}
                         style={{ fontSize: "9px", fontWeight: "700", color: "var(--c-warn)", marginLeft: "4px", flexShrink: 0 }}>
                         ⏰{catAlerts.length}
                       </span>
@@ -1234,15 +1249,15 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
             <p style={{ color: "var(--c-text-2)" }}>Loading checklist...</p>
           ) : viewMode === "dashboard" ? (() => {
             const today = new Date(); today.setHours(0,0,0,0);
-            const inProgressItems = checklists.filter((c) => c.status === "in_progress");
-            const itemsWithDue = checklists
+            const inProgressItems = enabledChecklists.filter((c) => c.status === "in_progress");
+            const itemsWithDue = enabledChecklists
               .filter((c) => c.status !== "complete" && c.status !== "na")
               .map((c) => ({ ...c, dueDate: getItemDueDate(c) }))
               .filter((c) => c.dueDate);
             const pastDueItems = itemsWithDue.filter((c) => c.dueDate < today);
             const dueSoonItems = itemsWithDue.filter((c) => {
               const diff = Math.ceil((c.dueDate - today) / 86400000);
-              return diff >= 0 && diff <= 7;
+              return diff === 0;
             });
             const statCard = (label, value, color) => (
               <div key={label} style={{ background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: "10px", padding: "16px 20px", textAlign: "center" }}>
@@ -1281,7 +1296,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
             });
             const getMsProgress = (msId) => {
               const ids = [...(milestoneItemIds[msId] || new Set())];
-              const msItems = ids.map((id) => checklists.find((c) => c.id === id)).filter(Boolean);
+              const msItems = ids.map((id) => enabledChecklists.find((c) => c.id === id)).filter(Boolean);
               const done = msItems.filter((c) => c.status === "complete").length;
               const applicable = msItems.filter((c) => c.status !== "na").length;
               return { items: msItems, done, applicable, pct: applicable ? Math.round(done / applicable * 100) : 0 };
@@ -1558,9 +1573,9 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   </div>
                 )}
 
-                {/* ── 6. Past Due / Due Soon / In Progress ──────────── */}
+                {/* ── 6. Past Due / Due Today / In Progress ──────────── */}
                 <DueList items={pastDueItems} title={`⚠ Past Due (${pastDueItems.length})`} color="var(--c-err)" />
-                <DueList items={dueSoonItems} title={`⏰ Due Soon — next 7 days (${dueSoonItems.length})`} color="var(--c-warn)" />
+                <DueList items={dueSoonItems} title={`⏰ Due Today (${dueSoonItems.length})`} color="var(--c-warn)" />
                 {inProgressItems.length > 0 && (
                   <div style={{ marginBottom: "24px" }}>
                     <h3 style={{ color: "var(--c-purple)", margin: "0 0 10px", fontSize: "14px", fontWeight: "700" }}>▶ In Progress ({inProgressItems.length})</h3>
@@ -1622,7 +1637,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   .map((c) => ({ ...c, _dueDate: getItemDueDate(c) }))
                   .filter((c) => c._dueDate);
                 const pastDue = catDue.filter((c) => c._dueDate < todayCv);
-                const dueSoon = catDue.filter((c) => { const d = Math.ceil((c._dueDate - todayCv) / 86400000); return d >= 0 && d <= 7; });
+                const dueSoon = catDue.filter((c) => { const d = Math.ceil((c._dueDate - todayCv) / 86400000); return d === 0; });
                 if (pastDue.length === 0 && dueSoon.length === 0) return null;
                 return (
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "12px" }}>
@@ -1633,7 +1648,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                     )}
                     {dueSoon.length > 0 && (
                       <span style={{ fontSize: "12px", fontWeight: "600", color: "var(--c-warn)", background: "var(--c-warn-bg)", border: "1px solid var(--c-warn)", borderRadius: "6px", padding: "4px 10px" }}>
-                        ⏰ {dueSoon.length} item{dueSoon.length > 1 ? "s" : ""} due within 7 days
+                        ⏰ {dueSoon.length} item{dueSoon.length > 1 ? "s" : ""} due today
                       </span>
                     )}
                   </div>

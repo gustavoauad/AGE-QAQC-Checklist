@@ -35,13 +35,21 @@ export default function OrgDashboard({ session, org }) {
     if (!projs.length) { setLoading(false); return; }
 
     const ids = projs.map((p) => p.id);
-    const { data: checklists } = await supabase
-      .from("checklists").select("project_id, category, status").in("project_id", ids);
+    const [{ data: checklists }, { data: configRows }] = await Promise.all([
+      supabase.from("checklists").select("project_id, category, status").in("project_id", ids),
+      supabase.from("project_checklist_config").select("project_id, category, enabled").in("project_id", ids),
+    ]);
+    // A checklist (category) turned off for a project doesn't apply there —
+    // exclude its items entirely from org-wide stats, same as the project's own dashboard.
+    const disabledKey = new Set(
+      (configRows || []).filter((r) => r.enabled === false).map((r) => `${r.project_id}:${r.category}`)
+    );
 
     const statsMap = {};
     const catMap = {};
     projs.forEach((p) => { statsMap[p.id] = { total: 0, complete: 0, na: 0, pending: 0 }; catMap[p.id] = {}; });
     (checklists || []).forEach((c) => {
+      if (disabledKey.has(`${c.project_id}:${c.category}`)) return;
       const s = statsMap[c.project_id]; if (!s) return;
       s.total++; s[c.status] = (s[c.status] || 0) + 1;
       const cs = catMap[c.project_id];
@@ -103,13 +111,16 @@ export default function OrgDashboard({ session, org }) {
       let statusMap = {};
       if (allItemIds.length > 0) {
         const { data: clRows } = await supabase
-          .from("checklists").select("id, status").in("id", allItemIds);
-        (clRows || []).forEach((r) => { statusMap[r.id] = r.status; });
+          .from("checklists").select("id, project_id, category, status").in("id", allItemIds);
+        (clRows || []).forEach((r) => {
+          if (disabledKey.has(`${r.project_id}:${r.category}`)) return;
+          statusMap[r.id] = r.status;
+        });
       }
       const msStats = {};
       activeMsIds.forEach((id) => { msStats[id] = { total: 0, complete: 0 }; });
       Object.entries(itemToMs).forEach(([itemId, msId]) => {
-        if (!msStats[msId]) return;
+        if (!msStats[msId] || !(itemId in statusMap)) return;
         msStats[msId].total++;
         if (statusMap[itemId] === "complete") msStats[msId].complete++;
       });

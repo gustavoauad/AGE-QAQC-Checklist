@@ -219,6 +219,8 @@ function ChecklistsTab({ org, orgRole }) {
   const [expandedCat, setExpandedCat] = useState(null);
   const [renamingCat, setRenamingCat] = useState(null);
   const [renameText, setRenameText] = useState("");
+  const [abbrEditing, setAbbrEditing] = useState(null);
+  const [abbrDraft, setAbbrDraft] = useState("");
   const [editingItemId, setEditingItemId] = useState(null);
   const [editItemText, setEditItemText] = useState("");
   const [editItemHelpText, setEditItemHelpText] = useState("");
@@ -249,7 +251,7 @@ function ChecklistsTab({ org, orgRole }) {
     const cfgMap = {};
     const customs = [];
     (cfgData || []).forEach((r) => {
-      cfgMap[r.category] = { enabled: r.enabled, label: r.label, is_custom: r.is_custom };
+      cfgMap[r.category] = { enabled: r.enabled, label: r.label, is_custom: r.is_custom, abbreviation: r.abbreviation };
       if (r.is_custom) customs.push({ id: r.category, label: r.label, sort_order: r.sort_order });
     });
     setConfig(cfgMap);
@@ -448,6 +450,16 @@ function ChecklistsTab({ org, orgRole }) {
     );
     setConfig((p) => ({ ...p, [catId]: { ...p[catId], label: renameText.trim() } }));
     setRenamingCat(null);
+  };
+
+  const saveOrgAbbr = async (catId) => {
+    const val = abbrDraft.trim();
+    await supabase.from("org_checklist_config").upsert(
+      { organization_id: org.id, category: catId, abbreviation: val || null, label: config[catId]?.label || null, enabled: config[catId]?.enabled !== false },
+      { onConflict: "organization_id,category" }
+    );
+    setConfig((p) => ({ ...p, [catId]: { ...p[catId], abbreviation: val || null } }));
+    setAbbrEditing(null);
   };
 
   const saveItemEdit = async (item) => {
@@ -664,6 +676,11 @@ function ChecklistsTab({ org, orgRole }) {
   const handleDragEnd = () => { dragInfo.current = null; setDragOver(null); };
 
   const getLabel = (cat) => config[cat.id]?.label || cat.label;
+  const getAbbr = (cat) => {
+    const custom = config[cat.id]?.abbreviation?.trim();
+    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 10);
+    return getLabel(cat).replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
+  };
 
   if (loading) return <p style={{ color: "var(--c-text-2)" }}>Loading...</p>;
 
@@ -777,6 +794,23 @@ function ChecklistsTab({ org, orgRole }) {
                       padding: "3px 8px", background: "transparent", border: "1px solid #29439b",
                       color: "#818cf8", borderRadius: "5px", cursor: "pointer", fontSize: "11px",
                     }}>↗ Push</button>
+                    {abbrEditing === cat.id ? (
+                      <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+                        <input autoFocus value={abbrDraft} onChange={(e) => setAbbrDraft(e.target.value)}
+                          placeholder={getAbbr(cat)} maxLength={10}
+                          onKeyDown={(e) => { if (e.key === "Enter") saveOrgAbbr(cat.id); if (e.key === "Escape") setAbbrEditing(null); }}
+                          style={{ width: "70px", padding: "3px 6px", background: "var(--c-surface)", border: "1px solid #0095da", borderRadius: "4px", color: "var(--c-text)", fontSize: "11px", textTransform: "uppercase" }}
+                        />
+                        <button onClick={() => saveOrgAbbr(cat.id)} style={{ padding: "3px 8px", background: "var(--c-accent)", color: "white", border: "none", borderRadius: "5px", cursor: "pointer", fontSize: "11px" }}>Save</button>
+                        <button onClick={() => setAbbrEditing(null)} style={{ padding: "3px 8px", background: "transparent", border: "1px solid #334155", color: "var(--c-text-3)", borderRadius: "5px", cursor: "pointer", fontSize: "11px" }}>×</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => { setAbbrEditing(cat.id); setAbbrDraft(config[cat.id]?.abbreviation || ""); }}
+                        title="Customize reference-code abbreviation" style={{
+                        padding: "3px 8px", background: "transparent", border: "1px solid #334155",
+                        color: "var(--c-text-3)", borderRadius: "5px", cursor: "pointer", fontSize: "11px",
+                      }}>Abbr: {getAbbr(cat)}</button>
+                    )}
                     <button onClick={() => { setRenamingCat(cat.id); setRenameText(getLabel(cat)); }} style={{
                       padding: "3px 8px", background: "transparent", border: "1px solid #334155",
                       color: "var(--c-text-3)", borderRadius: "5px", cursor: "pointer", fontSize: "11px",
