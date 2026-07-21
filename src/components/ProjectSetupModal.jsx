@@ -164,7 +164,7 @@ function ChecklistsTab({ project, userRole }) {
   // is trusted verbatim (just sanitized/uppercased), not force-truncated to 4 chars.
   const getAbbr = (cat) => {
     const custom = config[cat.id]?.abbreviation?.trim();
-    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 10);
+    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 3);
     return getLabel(cat).replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
   };
   const mBtn = (extra = {}) => ({ padding: "3px 7px", background: "transparent", border: "1px solid #334155", color: "var(--c-text-3)", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontFamily: "Manrope, sans-serif", ...extra });
@@ -244,9 +244,11 @@ function ChecklistsTab({ project, userRole }) {
   };
 
   const saveItemEdit = async (item) => {
-    if (!editItemText.trim()) { setEditingItemId(null); return; }
-    await supabase.from("checklists").update({ item_text: editItemText.trim(), edited_by_pm: true }).eq("id", item.id);
-    setItems((p) => ({ ...p, [item.category]: p[item.category].map((i) => i.id === item.id ? { ...i, item_text: editItemText.trim(), edited_by_pm: true } : i) }));
+    const text = editItemText.trim();
+    if (!text) { setEditingItemId(null); return; }
+    if (text === item.item_text) { setEditingItemId(null); return; }
+    await supabase.from("checklists").update({ item_text: text, edited_by_pm: true }).eq("id", item.id);
+    setItems((p) => ({ ...p, [item.category]: p[item.category].map((i) => i.id === item.id ? { ...i, item_text: text, edited_by_pm: true } : i) }));
     setEditingItemId(null);
   };
 
@@ -257,9 +259,29 @@ function ChecklistsTab({ project, userRole }) {
     setTooltipEditing(null);
   };
 
+  // A deadline computed from days_before must not land before the previous milestone's
+  // own date — e.g. DD due 8/30 with 40 days_before would fall on 7/21, before SD's
+  // 8/1, which makes no sense (DD's checklist item would be "due" before SD even happens).
+  const validateDaysBefore = (milestoneId, days) => {
+    if (days == null) return null;
+    const sorted = [...milestones].sort((a, b) => a.date.localeCompare(b.date));
+    const idx = sorted.findIndex((m) => m.id === milestoneId);
+    if (idx <= 0) return null;
+    const m = sorted[idx];
+    const prev = sorted[idx - 1];
+    const dueDate = new Date(new Date(m.date + "T00:00:00").getTime() - days * 86400000);
+    const prevDate = new Date(prev.date + "T00:00:00");
+    if (dueDate < prevDate) {
+      return `${days}d before "${m.name}" (${m.date}) falls on ${dueDate.toISOString().slice(0, 10)}, before the previous milestone "${prev.name}" (${prev.date}). Choose a smaller number of days.`;
+    }
+    return null;
+  };
+
   const saveMilestoneDays = async (itemIds, milestoneId, daysStr) => {
     const days = daysStr === "" ? null : parseInt(daysStr, 10);
     if (days !== null && (isNaN(days) || days < 0)) return;
+    const validationError = validateDaysBefore(milestoneId, days);
+    if (validationError) { alert(validationError); return; }
     const targets = itemIds.filter((id) => itemMilestones[id]?.has(milestoneId));
     if (!targets.length) return;
     await Promise.all(targets.map((id) =>
@@ -305,11 +327,20 @@ function ChecklistsTab({ project, userRole }) {
       if (add) next[itemId].add(depOnId); else next[itemId].delete(depOnId);
       return next;
     });
+    const revert = () => setItemDeps((prev) => {
+      const next = { ...prev };
+      next[itemId] = new Set(next[itemId] || []);
+      if (add) next[itemId].delete(depOnId); else next[itemId].add(depOnId);
+      return next;
+    });
     if (add) {
-      supabase.from("checklist_item_dependencies").insert({ item_id: itemId, depends_on_item_id: depOnId });
+      const { error } = await supabase.from("checklist_item_dependencies")
+        .upsert({ item_id: itemId, depends_on_item_id: depOnId }, { onConflict: "item_id,depends_on_item_id" });
+      if (error) { console.error("dependency insert failed:", error); revert(); alert("Could not save dependency: " + error.message); }
     } else {
-      supabase.from("checklist_item_dependencies").delete()
+      const { error } = await supabase.from("checklist_item_dependencies").delete()
         .eq("item_id", itemId).eq("depends_on_item_id", depOnId);
+      if (error) { console.error("dependency delete failed:", error); revert(); alert("Could not remove dependency: " + error.message); }
     }
   };
 
@@ -335,6 +366,15 @@ function ChecklistsTab({ project, userRole }) {
   const applyDaysPopover = async () => {
     if (!daysPopover) return;
     const { type, catId, sectionLabel, msInputs } = daysPopover;
+
+    // Validate every entry up front — a partial save (some milestones applied, one
+    // silently skipped) would be confusing, so reject the whole action instead.
+    for (const [msId, val] of Object.entries(msInputs)) {
+      const days = val === "" ? null : parseInt(val, 10);
+      const err = validateDaysBefore(msId, days);
+      if (err) { alert(err); return; }
+    }
+
     const scopeItems = (items[catId] || []).filter((i) => type === "section" ? i.sub_section === sectionLabel : true);
     await Promise.all(
       Object.entries(msInputs).map(([msId, val]) => saveMilestoneDays(scopeItems.map((i) => i.id), msId, val))
@@ -664,9 +704,9 @@ function ChecklistsTab({ project, userRole }) {
                     {abbrEditing === cat.id ? (
                       <div style={{ display: "flex", gap: "4px", alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
                         <input autoFocus value={abbrDraft} onChange={(e) => setAbbrDraft(e.target.value)}
-                          placeholder={getAbbr(cat)} maxLength={10}
+                          placeholder={getAbbr(cat)} maxLength={3}
                           onKeyDown={(e) => { if (e.key === "Enter") saveAbbr(cat.id); if (e.key === "Escape") setAbbrEditing(null); }}
-                          style={{ width: "70px", padding: "3px 6px", background: "var(--c-surface)", border: "1px solid #0095da", borderRadius: "4px", color: "var(--c-text)", fontSize: "11px", textTransform: "uppercase" }}
+                          style={{ width: "44px", padding: "3px 6px", background: "var(--c-surface)", border: "1px solid #0095da", borderRadius: "4px", color: "var(--c-text)", fontSize: "11px", textTransform: "uppercase" }}
                         />
                         <button onClick={() => saveAbbr(cat.id)} style={mBtn({ background: "var(--c-accent)", color: "white", border: "none" })}>Save</button>
                         <button onClick={() => setAbbrEditing(null)} style={mBtn()}>x</button>

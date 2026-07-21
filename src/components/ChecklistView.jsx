@@ -181,7 +181,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   // 4-char prefix; kept in sync with the same logic in ProjectSetupModal.jsx.
   const getCatAbbr = (catId) => {
     const custom = categoryConfig[catId]?.abbreviation?.trim();
-    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 10);
+    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 3);
     return getCatLabel(catId).replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
   };
 
@@ -261,6 +261,16 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         if (b.noDeadline) return -1;
         return a.dueDate - b.dueDate;
       });
+  };
+
+  // Milestones assigned to an item, sorted chronologically by the milestone's own date —
+  // used to enforce "complete the earlier deadline first" in the completion popup.
+  const getSortedAssignedMilestones = (itemId) => {
+    const ids = itemMsIdMap[itemId] || [];
+    return ids
+      .map((id) => milestones.find((m) => m.id === id))
+      .filter((m) => m?.date)
+      .sort((a, b) => a.date.localeCompare(b.date));
   };
 
   // Earliest due date among milestones this item is still outstanding for
@@ -371,11 +381,21 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   // Opens the popup for items assigned to 2+ milestones, letting the user pick which
   // specific deadline(s) this completion applies to instead of an all-or-nothing toggle.
   const openMilestoneCompletePopup = (item) => {
-    const assignedMsIds = itemMsIdMap[item.id] || [];
     const completedMap = itemMsCompletedMap[item.id] || {};
-    const selected = new Set(assignedMsIds.filter((id) => completedMap[id]));
+    const sortedMs = getSortedAssignedMilestones(item.id);
+    const selected = new Set(sortedMs.filter((m) => completedMap[m.id]).map((m) => m.id));
     if (item.status !== "complete" && item.status !== "in_progress" && selected.size === 0) {
-      assignedMsIds.forEach((id) => selected.add(id));
+      // Convenience default: pre-check every milestone that's currently eligible
+      // (its turn has come — the previous deadline's date has already passed),
+      // stopping at the first one that isn't yet reached.
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      for (const m of sortedMs) {
+        const idx = sortedMs.indexOf(m);
+        const prev = idx > 0 ? sortedMs[idx - 1] : null;
+        const dateOk = !prev || today >= new Date(prev.date + "T00:00:00");
+        if (!dateOk) break;
+        selected.add(m.id);
+      }
     }
     setMilestoneCompletePopup({ item, selected });
   };
@@ -385,6 +405,21 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const applyMilestoneCompletion = async (item, selectedIds) => {
     const assignedMsIds = itemMsIdMap[item.id] || [];
     const allSelected = assignedMsIds.length > 0 && selectedIds.size === assignedMsIds.length;
+
+    // Defense in depth: reject a selection that skips ahead of an earlier, not-yet-due
+    // deadline, even though the popup's checkboxes already prevent this in normal use.
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const sortedMs = getSortedAssignedMilestones(item.id);
+    for (let i = 0; i < sortedMs.length; i++) {
+      if (!selectedIds.has(sortedMs[i].id)) continue;
+      const prev = i > 0 ? sortedMs[i - 1] : null;
+      const dateOk = !prev || today >= new Date(prev.date + "T00:00:00");
+      const orderOk = i === 0 || selectedIds.has(sortedMs[i - 1].id);
+      if (!dateOk || !orderOk) {
+        alert(`Cannot mark "${sortedMs[i].name}" complete before "${prev.name}" (${prev.date}) is completed and its date has passed.`);
+        return;
+      }
+    }
 
     if (allSelected) {
       const parentIds = [...(itemDeps[item.id] || new Set())];
@@ -630,7 +665,17 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   }, {});
 
   const activeMilestoneItemIds = activeMilestoneId ? (milestoneItemsCache[activeMilestoneId] || null) : null;
-  const milestoneItems = activeMilestoneItemIds ? applyFilters(enabledChecklists.filter((c) => activeMilestoneItemIds.has(c.id))) : [];
+  const milestoneItemsRaw = activeMilestoneItemIds ? applyFilters(enabledChecklists.filter((c) => activeMilestoneItemIds.has(c.id))) : [];
+  // Order to match the "By Category" tab: category order follows enabledCategories
+  // (the curated list), not the raw DB fetch order (alphabetical by category key).
+  const categoryOrderIndex = {};
+  enabledCategories.forEach((cat, idx) => { categoryOrderIndex[cat.id] = idx; });
+  const milestoneItems = [...milestoneItemsRaw].sort((a, b) => {
+    const ca = categoryOrderIndex[a.category] ?? 9999;
+    const cb = categoryOrderIndex[b.category] ?? 9999;
+    if (ca !== cb) return ca - cb;
+    return (a.sort_order ?? 9999) - (b.sort_order ?? 9999) || a.item_id.localeCompare(b.item_id);
+  });
   const groupedMilestoneItems = milestoneItems.reduce((acc, item) => {
     const catLabel = getCatLabel(item.category);
     const key = item.sub_section ? `${catLabel} — ${item.sub_section}` : catLabel;
@@ -809,11 +854,10 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                     ⚠ No deadline set
                   </span>
                 )}
-                {status !== "na" && msIds.map((msId) => {
+                {status !== "na" && dueInfos.map((info) => {
+                  const msId = info.milestoneId;
                   const ms = milestones.find((m) => m.id === msId);
                   if (!ms) return null;
-                  const info = dueInfos.find((d) => d.milestoneId === msId);
-                  if (!info) return null;
 
                   if (info.completed) {
                     const doneStr = new Date(info.completed.completedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -1025,9 +1069,9 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       {/* View mode toggle */}
       <div style={{ background: "var(--c-surface)", borderBottom: "1px solid #334155", padding: "0 16px", display: "flex" }}>
         {[
+          { id: "dashboard", label: "📊 Dashboard" },
           { id: "category",  label: "By Category" },
           { id: "milestone", label: "By Milestone" },
-          { id: "dashboard", label: "📊 Dashboard" },
         ].map(({ id, label }) => (
           <button key={id} onClick={async () => {
             if (id === "dashboard") { setViewMode("dashboard"); await loadQaqcAlerts(); }
@@ -1265,24 +1309,50 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                 <div style={{ fontSize: "11px", fontWeight: "600", color: "var(--c-text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginTop: "4px" }}>{label}</div>
               </div>
             );
+            // Groups items by category + section (same order as "By Category") so
+            // Past Due / Due Today lists show clear context instead of a flat list.
+            const groupItemsByCategory = (list) => {
+              const sorted = [...list].sort((a, b) => {
+                const ca = categoryOrderIndex[a.category] ?? 9999;
+                const cb = categoryOrderIndex[b.category] ?? 9999;
+                if (ca !== cb) return ca - cb;
+                return (a.sort_order ?? 9999) - (b.sort_order ?? 9999) || a.item_id.localeCompare(b.item_id);
+              });
+              const groups = [];
+              const byKey = {};
+              sorted.forEach((item) => {
+                const catLabel = getCatLabel(item.category);
+                const key = item.sub_section ? `${catLabel} — ${item.sub_section}` : catLabel;
+                if (!byKey[key]) { byKey[key] = { key, items: [] }; groups.push(byKey[key]); }
+                byKey[key].items.push(item);
+              });
+              return groups;
+            };
             const DueList = ({ items, title, color }) => items.length === 0 ? null : (
               <div style={{ marginBottom: "24px" }}>
                 <h3 style={{ color: color, margin: "0 0 10px", fontSize: "14px", fontWeight: "700" }}>{title}</h3>
-                <div style={{ display: "grid", gap: "6px" }}>
-                  {items.map((c) => {
-                    const dLeft = Math.ceil((c.dueDate - today) / 86400000);
-                    return (
-                      <div key={c.id} style={{ background: "var(--c-surface)", border: `1px solid ${color}`, borderRadius: "8px", padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "10px" }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <span style={{ fontSize: "10px", color: "var(--c-text-4)", fontFamily: "monospace" }}>{refCodes[c.id]} </span>
-                          <span style={{ fontSize: "13px", color: "var(--c-text)" }}>{c.item_text}</span>
-                        </div>
-                        <span style={{ fontSize: "10px", fontWeight: "700", color, flexShrink: 0 }}>
-                          {dLeft < 0 ? `${Math.abs(dLeft)}d overdue` : dLeft === 0 ? "due today" : `${dLeft}d left`}
-                        </span>
+                <div style={{ display: "grid", gap: "14px" }}>
+                  {groupItemsByCategory(items).map((g) => (
+                    <div key={g.key}>
+                      <p style={{ fontSize: "11px", fontWeight: "700", color: "var(--c-text-3)", textTransform: "uppercase", letterSpacing: "0.05em", margin: "0 0 6px" }}>{g.key}</p>
+                      <div style={{ display: "grid", gap: "6px" }}>
+                        {g.items.map((c) => {
+                          const dLeft = Math.ceil((c.dueDate - today) / 86400000);
+                          return (
+                            <div key={c.id} style={{ background: "var(--c-surface)", border: `1px solid ${color}`, borderRadius: "8px", padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "10px" }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <span style={{ fontSize: "10px", color: "var(--c-text-4)", fontFamily: "monospace" }}>{refCodes[c.id]} </span>
+                                <span style={{ fontSize: "13px", color: "var(--c-text)" }}>{c.item_text}</span>
+                              </div>
+                              <span style={{ fontSize: "10px", fontWeight: "700", color, flexShrink: 0 }}>
+                                {dLeft < 0 ? `${Math.abs(dLeft)}d overdue` : dLeft === 0 ? "due today" : `${dLeft}d left`}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
-                    );
-                  })}
+                    </div>
+                  ))}
                 </div>
               </div>
             );
@@ -1699,11 +1769,28 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       {/* Multi-milestone completion picker */}
       {milestoneCompletePopup && (() => {
         const { item, selected } = milestoneCompletePopup;
-        const assignedMsIds = itemMsIdMap[item.id] || [];
-        const toggleMs = (msId) => {
+        const sortedMs = getSortedAssignedMilestones(item.id);
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        // Milestone at index i is checkable only once the previous one's date has
+        // passed (its turn has "come up") AND every earlier milestone is selected —
+        // deadlines must be completed in order, earliest first.
+        const eligibility = sortedMs.map((m, idx) => {
+          const prev = idx > 0 ? sortedMs[idx - 1] : null;
+          const dateOk = !prev || today >= new Date(prev.date + "T00:00:00");
+          const orderOk = idx === 0 || selected.has(sortedMs[idx - 1].id);
+          return { ...m, eligible: dateOk && orderOk, dateOk, prev };
+        });
+        const toggleMs = (msId, eligible) => {
           setMilestoneCompletePopup((prev) => {
             const nextSel = new Set(prev.selected);
-            if (nextSel.has(msId)) nextSel.delete(msId); else nextSel.add(msId);
+            if (nextSel.has(msId)) {
+              // Unchecking an earlier deadline must also clear any later ones that
+              // depend on it, so the selection never ends up out of order.
+              const idx = sortedMs.findIndex((m) => m.id === msId);
+              sortedMs.slice(idx).forEach((m) => nextSel.delete(m.id));
+            } else if (eligible) {
+              nextSel.add(msId);
+            }
             return { ...prev, selected: nextSel };
           });
         };
@@ -1714,16 +1801,22 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
               <h3 style={{ margin: "0 0 4px", fontSize: "15px", color: "var(--c-text)" }}>Complete for which deadline(s)?</h3>
               <p style={{ margin: "0 0 14px", fontSize: "12px", color: "var(--c-text-3)", lineHeight: "1.5" }}>{item.item_text}</p>
               <div style={{ display: "grid", gap: "8px", marginBottom: "18px", maxHeight: "50vh", overflowY: "auto" }}>
-                {assignedMsIds.map((msId) => {
-                  const ms = milestones.find((m) => m.id === msId);
-                  if (!ms) return null;
-                  const isChecked = selected.has(msId);
+                {eligibility.map((ms) => {
+                  const isChecked = selected.has(ms.id);
+                  const disabled = !isChecked && !ms.eligible;
+                  const reason = !ms.dateOk
+                    ? `Not yet current — becomes available once "${ms.prev.name}" (${ms.prev.date}) has passed`
+                    : !isChecked && !ms.eligible
+                      ? `Complete "${ms.prev.name}" first`
+                      : null;
                   return (
-                    <label key={msId} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 10px", background: "var(--c-bg)", borderRadius: "8px", border: `1px solid ${isChecked ? "var(--c-ok)" : "var(--c-border)"}`, cursor: "pointer" }}>
-                      <input type="checkbox" checked={isChecked} onChange={() => toggleMs(msId)} />
+                    <label key={ms.id} title={reason || undefined}
+                      style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 10px", background: "var(--c-bg)", borderRadius: "8px", border: `1px solid ${isChecked ? "var(--c-ok)" : "var(--c-border)"}`, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1 }}>
+                      <input type="checkbox" checked={isChecked} disabled={disabled} onChange={() => toggleMs(ms.id, ms.eligible)} />
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: "13px", color: "var(--c-text)", fontWeight: "600" }}>{ms.name}</div>
-                        <div style={{ fontSize: "11px", color: "var(--c-text-3)" }}>{ms.date ? new Date(ms.date + "T00:00:00").toLocaleDateString() : "no date set"}</div>
+                        <div style={{ fontSize: "11px", color: "var(--c-text-3)" }}>{new Date(ms.date + "T00:00:00").toLocaleDateString()}</div>
+                        {reason && <div style={{ fontSize: "10px", color: "var(--c-warn)", marginTop: "2px" }}>{reason}</div>}
                       </div>
                     </label>
                   );

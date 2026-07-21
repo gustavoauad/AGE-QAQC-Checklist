@@ -678,7 +678,7 @@ function ChecklistsTab({ org, orgRole }) {
   const getLabel = (cat) => config[cat.id]?.label || cat.label;
   const getAbbr = (cat) => {
     const custom = config[cat.id]?.abbreviation?.trim();
-    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 10);
+    if (custom) return custom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 3);
     return getLabel(cat).replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
   };
 
@@ -797,9 +797,9 @@ function ChecklistsTab({ org, orgRole }) {
                     {abbrEditing === cat.id ? (
                       <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
                         <input autoFocus value={abbrDraft} onChange={(e) => setAbbrDraft(e.target.value)}
-                          placeholder={getAbbr(cat)} maxLength={10}
+                          placeholder={getAbbr(cat)} maxLength={3}
                           onKeyDown={(e) => { if (e.key === "Enter") saveOrgAbbr(cat.id); if (e.key === "Escape") setAbbrEditing(null); }}
-                          style={{ width: "70px", padding: "3px 6px", background: "var(--c-surface)", border: "1px solid #0095da", borderRadius: "4px", color: "var(--c-text)", fontSize: "11px", textTransform: "uppercase" }}
+                          style={{ width: "44px", padding: "3px 6px", background: "var(--c-surface)", border: "1px solid #0095da", borderRadius: "4px", color: "var(--c-text)", fontSize: "11px", textTransform: "uppercase" }}
                         />
                         <button onClick={() => saveOrgAbbr(cat.id)} style={{ padding: "3px 8px", background: "var(--c-accent)", color: "white", border: "none", borderRadius: "5px", cursor: "pointer", fontSize: "11px" }}>Save</button>
                         <button onClick={() => setAbbrEditing(null)} style={{ padding: "3px 8px", background: "transparent", border: "1px solid #334155", color: "var(--c-text-3)", borderRadius: "5px", cursor: "pointer", fontSize: "11px" }}>×</button>
