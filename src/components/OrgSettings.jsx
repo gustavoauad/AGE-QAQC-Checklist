@@ -239,6 +239,8 @@ function ChecklistsTab({ org, orgRole }) {
   const [renameSectionText, setRenameSectionText] = useState("");
   const dragInfo = useRef(null);
   const [dragOver, setDragOver] = useState(null);
+  const [bulkPushMode, setBulkPushMode] = useState(false);
+  const [bulkSelectedCats, setBulkSelectedCats] = useState(new Set());
 
   useEffect(() => { fetchAll(); }, []);
 
@@ -294,14 +296,32 @@ function ChecklistsTab({ org, orgRole }) {
   const [pushError, setPushError] = useState("");
   const [conflictNames, setConflictNames] = useState([]);
 
-  const openPushModal = async (cat) => {
-    setPushModal({ catId: cat.id, catLabel: getLabel(cat) });
+  const openPushModal = async (cat) => openPushModalForCats([{ id: cat.id, label: getLabel(cat) }]);
+
+  const openPushModalForCats = async (cats) => {
+    setPushModal({ cats });
     setPushStatus("idle"); setSelectedProjIds(new Set()); setPushError(""); setConflictNames([]);
     if (!orgProjects.length) {
       const { data } = await supabase.from("projects")
         .select("id, name").eq("organization_id", org.id).is("archived_at", null).order("name");
       setOrgProjects(data || []);
     }
+  };
+
+  const toggleBulkCat = (catId) => setBulkSelectedCats((prev) => {
+    const next = new Set(prev);
+    if (next.has(catId)) next.delete(catId); else next.add(catId);
+    return next;
+  });
+
+  const startBulkPush = () => {
+    const cats = allCats
+      .filter((c) => bulkSelectedCats.has(c.id))
+      .map((c) => ({ id: c.id, label: getLabel(c) }));
+    if (!cats.length) return;
+    setBulkPushMode(false);
+    setBulkSelectedCats(new Set());
+    openPushModalForCats(cats);
   };
 
   const toggleProject = (id) => setSelectedProjIds((prev) => {
@@ -318,28 +338,32 @@ function ChecklistsTab({ org, orgRole }) {
     }
   };
 
+  // Pushes every category in pushModal.cats to every selected project. Each category
+  // gets its own RPC call (the function only takes one category at a time) but they
+  // all share the same conflict-resolution action once the user picks one.
   const executePush = async (action) => {
     setPushStatus("pushing"); setPushError("");
-    const { catId, catLabel } = pushModal;
-    const catItems = items[catId] !== undefined ? items[catId] : await initCategory(catId);
-    const catSections = sections[catId] || [];
+    for (const { id: catId, label: catLabel } of pushModal.cats) {
+      const catItems = items[catId] !== undefined ? items[catId] : await initCategory(catId);
+      const catSections = sections[catId] || [];
 
-    // Order items: sectioned items grouped by section order, then unsectioned
-    const sectionOrder = catSections.map((s) => s.label);
-    const sortedItems = [
-      ...sectionOrder.flatMap((sl) => catItems.filter((i) => i.section === sl)),
-      ...catItems.filter((i) => !i.section),
-    ];
+      // Order items: sectioned items grouped by section order, then unsectioned
+      const sectionOrder = catSections.map((s) => s.label);
+      const sortedItems = [
+        ...sectionOrder.flatMap((sl) => catItems.filter((i) => i.section === sl)),
+        ...catItems.filter((i) => !i.section),
+      ];
 
-    const { error } = await supabase.rpc("push_checklist_to_projects", {
-      p_project_ids: [...selectedProjIds],
-      p_category:    catId,
-      p_label:       catLabel,
-      p_items:       sortedItems.map((i) => ({ item_id: i.item_id, item_text: i.item_text, section: i.section || null, help_text: i.help_text || null, days_before_milestone: i.days_before_milestone || null })),
-      p_action:      action,
-    });
+      const { error } = await supabase.rpc("push_checklist_to_projects", {
+        p_project_ids: [...selectedProjIds],
+        p_category:    catId,
+        p_label:       catLabel,
+        p_items:       sortedItems.map((i) => ({ item_id: i.item_id, item_text: i.item_text, section: i.section || null, help_text: i.help_text || null, days_before_milestone: i.days_before_milestone || null, is_level_based: !!i.is_level_based })),
+        p_action:      action,
+      });
 
-    if (error) { setPushError(error.message); setPushStatus("conflict"); return; }
+      if (error) { setPushError(`${catLabel}: ${error.message}`); setPushStatus("conflict"); return; }
+    }
     setPushStatus("done");
   };
 
@@ -347,8 +371,9 @@ function ChecklistsTab({ org, orgRole }) {
     if (selectedProjIds.size === 0) return;
     setPushStatus("checking");
     const ids = [...selectedProjIds];
+    const catIds = pushModal.cats.map((c) => c.id);
     const { data: existing } = await supabase.from("checklists")
-      .select("project_id").in("project_id", ids).eq("category", pushModal.catId).limit(ids.length);
+      .select("project_id").in("project_id", ids).in("category", catIds).limit(ids.length * catIds.length);
     const conflictIds = new Set((existing || []).map((r) => r.project_id));
     if (conflictIds.size > 0) {
       setConflictNames(orgProjects.filter((p) => conflictIds.has(p.id)).map((p) => p.name));
@@ -511,6 +536,28 @@ function ChecklistsTab({ org, orgRole }) {
     if (!window.confirm("Remove this item from the default checklist?")) return;
     await supabase.from("org_checklist_items").delete().eq("id", item.id);
     setItems((p) => ({ ...p, [item.category]: p[item.category].filter((i) => i.id !== item.id) }));
+  };
+
+  // Level-based toggle: single source of truth is per-item (org_checklist_items.is_level_based).
+  // Category/section toggles below are just bulk convenience actions over that same flag.
+  const toggleItemLevelBased = async (item) => {
+    const next = !item.is_level_based;
+    await supabase.from("org_checklist_items").update({ is_level_based: next }).eq("id", item.id);
+    setItems((p) => ({ ...p, [item.category]: p[item.category].map((i) => i.id === item.id ? { ...i, is_level_based: next } : i) }));
+  };
+
+  const setSectionLevelBased = async (catId, sectionLabel, value) => {
+    const targets = (items[catId] || []).filter((i) => (i.section || null) === sectionLabel);
+    if (!targets.length) return;
+    await supabase.from("org_checklist_items").update({ is_level_based: value }).in("id", targets.map((i) => i.id));
+    setItems((p) => ({ ...p, [catId]: p[catId].map((i) => (i.section || null) === sectionLabel ? { ...i, is_level_based: value } : i) }));
+  };
+
+  const setCategoryLevelBased = async (catId, value) => {
+    const targets = items[catId] || [];
+    if (!targets.length) return;
+    await supabase.from("org_checklist_items").update({ is_level_based: value }).in("id", targets.map((i) => i.id));
+    setItems((p) => ({ ...p, [catId]: p[catId].map((i) => ({ ...i, is_level_based: value })) }));
   };
 
   const addItem = async (catId, section) => {
@@ -707,15 +754,49 @@ function ChecklistsTab({ org, orgRole }) {
           </p>
         </div>
         {orgRole === "admin" && (
-          <button onClick={() => setAddingCat(true)} style={{
-            padding: "8px 16px", background: "var(--c-accent)", color: "white", border: "none",
-            borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600",
-            fontFamily: "Manrope, sans-serif", flexShrink: 0,
-          }}>
-            + Add Checklist
-          </button>
+          <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+            <button onClick={() => { setBulkPushMode((v) => !v); setBulkSelectedCats(new Set()); }} style={{
+              padding: "8px 16px",
+              background: bulkPushMode ? "var(--c-accent-dk)" : "transparent",
+              border: `1px solid ${bulkPushMode ? "var(--c-accent)" : "#29439b"}`,
+              color: bulkPushMode ? "var(--c-accent-lt)" : "#818cf8",
+              borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600",
+              fontFamily: "Manrope, sans-serif",
+            }}>
+              {bulkPushMode ? "Cancel" : "↗ Push Multiple"}
+            </button>
+            <button onClick={() => setAddingCat(true)} style={{
+              padding: "8px 16px", background: "var(--c-accent)", color: "white", border: "none",
+              borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: "600",
+              fontFamily: "Manrope, sans-serif",
+            }}>
+              + Add Checklist
+            </button>
+          </div>
         )}
       </div>
+
+      {/* Bulk push selection bar */}
+      {bulkPushMode && (
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px",
+          background: "var(--c-accent-dk)", border: "1px solid var(--c-accent)", borderRadius: "10px",
+          padding: "10px 16px", marginBottom: "12px", position: "sticky", top: 0, zIndex: 10,
+        }}>
+          <span style={{ color: "var(--c-accent-lt)", fontSize: "13px", fontWeight: "600" }}>
+            {bulkSelectedCats.size} checklist{bulkSelectedCats.size !== 1 ? "s" : ""} selected — check the ones to push together
+          </span>
+          <button onClick={startBulkPush} disabled={bulkSelectedCats.size === 0} style={{
+            padding: "7px 16px", fontWeight: "600", fontSize: "13px", border: "none", borderRadius: "7px",
+            fontFamily: "Manrope, sans-serif", flexShrink: 0,
+            background: bulkSelectedCats.size > 0 ? "var(--c-accent)" : "var(--c-surface)",
+            color: bulkSelectedCats.size > 0 ? "white" : "var(--c-text-4)",
+            cursor: bulkSelectedCats.size > 0 ? "pointer" : "not-allowed",
+          }}>
+            ↗ Push Selected
+          </button>
+        </div>
+      )}
 
       {/* New checklist form */}
       {addingCat && (
@@ -755,7 +836,12 @@ function ChecklistsTab({ org, orgRole }) {
             }}>
               {/* Category header row */}
               <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "12px 16px" }}>
-                {orgRole === "admin" && (
+                {bulkPushMode && (
+                  <input type="checkbox" checked={bulkSelectedCats.has(cat.id)} onChange={() => toggleBulkCat(cat.id)}
+                    style={{ width: "16px", height: "16px", accentColor: "var(--c-accent)", flexShrink: 0, cursor: "pointer" }}
+                  />
+                )}
+                {orgRole === "admin" && !bulkPushMode && (
                   <button onClick={() => toggleCategory(cat.id)} style={{
                     padding: "3px 10px", borderRadius: "20px", border: "1px solid",
                     fontSize: "10px", fontWeight: "700", cursor: "pointer", flexShrink: 0,
@@ -788,12 +874,26 @@ function ChecklistsTab({ org, orgRole }) {
                     </div>
                   )}
                 </div>
-                {orgRole === "admin" && !isRenamingThis && (
+                {orgRole === "admin" && !isRenamingThis && !bulkPushMode && (
                   <div style={{ display: "flex", gap: "5px", flexShrink: 0 }}>
                     <button onClick={() => openPushModal(cat)} style={{
                       padding: "3px 8px", background: "transparent", border: "1px solid #29439b",
                       color: "#818cf8", borderRadius: "5px", cursor: "pointer", fontSize: "11px",
                     }}>↗ Push</button>
+                    {(() => {
+                      const catItemsAll = items[cat.id] || [];
+                      const allLevelBased = catItemsAll.length > 0 && catItemsAll.every((i) => i.is_level_based);
+                      return (
+                        <button onClick={() => setCategoryLevelBased(cat.id, !allLevelBased)}
+                          title={allLevelBased ? "Unset level-based for every item in this checklist" : "Mark every item in this checklist as level-based"}
+                          style={{
+                            padding: "3px 8px", background: "transparent",
+                            border: `1px solid ${allLevelBased ? "var(--c-accent)" : "#334155"}`,
+                            color: allLevelBased ? "var(--c-accent)" : "var(--c-text-3)",
+                            borderRadius: "5px", cursor: "pointer", fontSize: "11px",
+                          }}>🏢 Levels</button>
+                      );
+                    })()}
                     {abbrEditing === cat.id ? (
                       <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
                         <input autoFocus value={abbrDraft} onChange={(e) => setAbbrDraft(e.target.value)}
@@ -894,6 +994,17 @@ function ChecklistsTab({ org, orgRole }) {
                                   )}
                                   {orgRole === "admin" && (
                                     <div style={{ display: "flex", gap: "3px", flexShrink: 0 }}>
+                                      {(() => {
+                                        const sectionItemsAll = (items[cat.id] || []).filter((i) => (i.section || null) === section.label);
+                                        const allLevelBased = sectionItemsAll.length > 0 && sectionItemsAll.every((i) => i.is_level_based);
+                                        return (
+                                          <button onClick={() => setSectionLevelBased(cat.id, section.label, !allLevelBased)}
+                                            title={allLevelBased ? "Unset level-based for every item in this section" : "Mark every item in this section as level-based"}
+                                            style={{ ...mBtn(), color: allLevelBased ? "var(--c-accent)" : "var(--c-text-4)", borderColor: allLevelBased ? "var(--c-accent)" : "#334155" }}>
+                                            🏢
+                                          </button>
+                                        );
+                                      })()}
                                       <button onClick={() => { setRenamingSection({ catId: cat.id, label: section.label }); setRenameSectionText(section.label); }}
                                         style={mBtn()}>Rename</button>
                                       <button onClick={() => deleteSection(cat.id, section.label)}
@@ -961,6 +1072,7 @@ function ChecklistsTab({ org, orgRole }) {
                                         <span style={{ color: "var(--c-text-4)", fontSize: "13px", lineHeight: 1.4 }}>{item.item_text}</span>
                                         {item.help_text && <div style={{ fontSize: "11px", color: "var(--c-text-3)", marginTop: "2px" }}>ⓘ {item.help_text}</div>}
                                         {item.days_before_milestone && <div style={{ fontSize: "10px", color: "var(--c-accent-lt)", marginTop: "2px" }}>📅 {item.days_before_milestone}d before milestone</div>}
+                                        {item.is_level_based && <div style={{ fontSize: "10px", color: "var(--c-accent)", marginTop: "2px" }}>🏢 level-based</div>}
                                         {[...(orgItemDeps[item.id] || new Set())].length > 0 && (
                                           <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "4px" }}>
                                             {[...(orgItemDeps[item.id] || new Set())].map((depId) => {
@@ -1020,6 +1132,11 @@ function ChecklistsTab({ org, orgRole }) {
                                                 </div>
                                               );
                                             })()}
+                                            <button onClick={() => toggleItemLevelBased(item)}
+                                              title={item.is_level_based ? "Level-based — every project level must be completed per milestone. Click to unset." : "Mark as level-based"}
+                                              style={{ ...mBtn(), color: item.is_level_based ? "var(--c-accent)" : "var(--c-text-4)", borderColor: item.is_level_based ? "var(--c-accent)" : "#334155" }}>
+                                              🏢
+                                            </button>
                                             <button onClick={() => { setEditingItemId(item.id); setEditItemText(item.item_text); setEditItemHelpText(item.help_text || ""); setEditItemDays(item.days_before_milestone ?? ""); }} style={mBtn()}>Edit</button>
                                             <button onClick={() => removeItem(item)} style={mBtn({ color: "var(--c-err)" })}>✕</button>
                                           </>
@@ -1134,6 +1251,7 @@ function ChecklistsTab({ org, orgRole }) {
                                             <span style={{ color: "var(--c-text-2)", fontSize: "13px", lineHeight: 1.4 }}>{item.item_text}</span>
                                             {item.help_text && <div style={{ fontSize: "11px", color: "var(--c-text-3)", marginTop: "2px" }}>ⓘ {item.help_text}</div>}
                                             {item.days_before_milestone && <div style={{ fontSize: "10px", color: "var(--c-accent-lt)", marginTop: "2px" }}>📅 {item.days_before_milestone}d before milestone</div>}
+                                            {item.is_level_based && <div style={{ fontSize: "10px", color: "var(--c-accent)", marginTop: "2px" }}>🏢 level-based</div>}
                                           </div>
                                         )}
                                         {orgRole === "admin" && (
@@ -1145,6 +1263,11 @@ function ChecklistsTab({ org, orgRole }) {
                                               </>
                                             ) : (
                                               <>
+                                                <button onClick={() => toggleItemLevelBased(item)}
+                                                  title={item.is_level_based ? "Level-based — every project level must be completed per milestone. Click to unset." : "Mark as level-based"}
+                                                  style={{ ...mBtn(), color: item.is_level_based ? "var(--c-accent)" : "var(--c-text-4)", borderColor: item.is_level_based ? "var(--c-accent)" : "#334155" }}>
+                                                  🏢
+                                                </button>
                                                 <button onClick={() => { setEditingItemId(item.id); setEditItemText(item.item_text); setEditItemHelpText(item.help_text || ""); setEditItemDays(item.days_before_milestone ?? ""); }} style={mBtn()}>Edit</button>
                                                 <button onClick={() => removeItem(item)} style={mBtn({ color: "var(--c-err)" })}>✕</button>
                                               </>
@@ -1243,15 +1366,18 @@ function ChecklistsTab({ org, orgRole }) {
       {pushModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: "16px" }}>
           <div style={{ background: "var(--c-surface)", borderRadius: "12px", padding: "28px", width: "100%", maxWidth: "440px", border: "1px solid #334155", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>
-            <h3 style={{ color: "var(--c-text)", margin: "0 0 6px", fontSize: "16px", fontFamily: "Manrope, sans-serif" }}>Push to Project</h3>
+            <h3 style={{ color: "var(--c-text)", margin: "0 0 6px", fontSize: "16px", fontFamily: "Manrope, sans-serif" }}>
+              Push {pushModal.cats.length > 1 ? `${pushModal.cats.length} Checklists` : "to Project"}
+            </h3>
             <p style={{ color: "var(--c-text-3)", fontSize: "13px", margin: "0 0 20px" }}>
-              Send <strong style={{ color: "var(--c-accent-lt)" }}>{pushModal.catLabel}</strong> checklist items to a project.
+              Send <strong style={{ color: "var(--c-accent-lt)" }}>{pushModal.cats.map((c) => c.label).join(", ")}</strong>
+              {" "}checklist item{pushModal.cats.length > 1 ? "s" : ""} to a project.
             </p>
 
             {pushStatus === "done" ? (
               <div style={{ textAlign: "center" }}>
                 <p style={{ color: "var(--c-ok-text)", fontSize: "15px", marginBottom: "20px" }}>
-                  ✓ Checklist pushed to {selectedProjIds.size} project{selectedProjIds.size !== 1 ? "s" : ""}!
+                  ✓ {pushModal.cats.length > 1 ? `${pushModal.cats.length} checklists` : "Checklist"} pushed to {selectedProjIds.size} project{selectedProjIds.size !== 1 ? "s" : ""}!
                 </p>
                 <button onClick={() => setPushModal(null)} style={{ padding: "10px 28px", background: "var(--c-border)", color: "var(--c-text)", border: "none", borderRadius: "8px", cursor: "pointer", fontFamily: "Manrope, sans-serif" }}>Close</button>
               </div>

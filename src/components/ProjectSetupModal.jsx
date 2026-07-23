@@ -1389,6 +1389,155 @@ function MilestonesTab({ project }) {
   );
 }
 
+// ── Levels tab ────────────────────────────────────────────────────────────
+function LevelsTab({ project }) {
+  const [levels, setLevels] = useState([]);
+  const [name, setName] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+
+  useEffect(() => { loadLevels(); }, []);
+
+  const loadLevels = async () => {
+    setLoading(true);
+    const { data, error: err } = await supabase
+      .from("project_levels").select("*").eq("project_id", project.id).order("sort_order");
+    if (err) setError("Failed to load levels: " + err.message);
+    setLevels(data || []);
+    setLoading(false);
+  };
+
+  const add = async (e) => {
+    e.preventDefault();
+    setError("");
+    setSaving(true);
+    const maxOrder = levels.reduce((m, l) => Math.max(m, l.sort_order ?? 0), -1);
+    const { error: err } = await supabase.from("project_levels").insert({
+      project_id: project.id, name, sort_order: maxOrder + 1,
+    });
+    if (err) { setError("Could not save level: " + err.message); }
+    else { setName(""); loadLevels(); }
+    setSaving(false);
+  };
+
+  const startEdit = (l) => { setEditingId(l.id); setEditName(l.name); };
+  const cancelEdit = () => setEditingId(null);
+
+  const saveEdit = async (id) => {
+    setEditSaving(true);
+    const { error: err } = await supabase.from("project_levels").update({ name: editName }).eq("id", id);
+    if (err) { setError("Could not update: " + err.message); }
+    else { setEditingId(null); loadLevels(); }
+    setEditSaving(false);
+  };
+
+  const remove = async (id) => {
+    if (!window.confirm("Delete this level? Any per-level completion recorded for it will be removed too.")) return;
+    const { error: err } = await supabase.from("project_levels").delete().eq("id", id);
+    if (err) { setError("Could not delete: " + err.message); return; }
+    setLevels((prev) => prev.filter((l) => l.id !== id));
+  };
+
+  const move = async (id, dir) => {
+    const idx = levels.findIndex((l) => l.id === id);
+    const swapIdx = idx + dir;
+    if (swapIdx < 0 || swapIdx >= levels.length) return;
+    const reordered = [...levels];
+    [reordered[idx], reordered[swapIdx]] = [reordered[swapIdx], reordered[idx]];
+    reordered.forEach((l, i) => { l.sort_order = i; });
+    setLevels(reordered);
+    await Promise.all(reordered.map((l) =>
+      supabase.from("project_levels").update({ sort_order: l.sort_order }).eq("id", l.id)
+    ));
+  };
+
+  return (
+    <div>
+      <p style={{ color: "var(--c-text-2)", fontSize: "14px", marginTop: 0 }}>
+        Define the building levels (floors) for this project. Mark a checklist, section, or item as
+        "level-based" in the org default checklists — a level-based item must be completed for every
+        level below before a milestone is really considered complete for it.
+      </p>
+
+      {error && (
+        <div style={{ background: "var(--c-err-bg)", border: "1px solid #ef4444", borderRadius: "8px", padding: "10px 14px", marginBottom: "16px", color: "var(--c-err-text)", fontSize: "13px" }}>
+          {error}
+        </div>
+      )}
+
+      {/* Add form */}
+      <form onSubmit={add} style={{ background: "var(--c-bg)", borderRadius: "8px", padding: "16px", marginBottom: "24px", border: "1px solid #334155", display: "flex", gap: "10px", alignItems: "end" }}>
+        <div style={{ flex: 1 }}>
+          <label style={labelStyle}>Level Name</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} required placeholder="e.g. Level 2" style={inputStyle} />
+        </div>
+        <button type="submit" disabled={saving} style={{
+          padding: "10px 20px", background: "var(--c-accent)", color: "white",
+          border: "none", borderRadius: "6px", cursor: saving ? "not-allowed" : "pointer", fontSize: "14px", fontWeight: "600",
+        }}>
+          {saving ? "Adding..." : "+ Add Level"}
+        </button>
+      </form>
+
+      {/* List */}
+      {loading ? (
+        <p style={{ color: "var(--c-text-2)" }}>Loading levels...</p>
+      ) : levels.length === 0 ? (
+        <p style={{ color: "var(--c-text-3)", fontSize: "14px" }}>No levels yet. Add one above.</p>
+      ) : (
+        <div style={{ display: "grid", gap: "10px" }}>
+          {levels.map((l, i) => {
+            const isEditing = editingId === l.id;
+
+            if (isEditing) {
+              return (
+                <div key={l.id} style={{ background: "var(--c-bg)", border: "1px solid #0095da", borderRadius: "8px", padding: "12px 14px", display: "flex", gap: "8px", alignItems: "center" }}>
+                  <input autoFocus value={editName} onChange={(e) => setEditName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveEdit(l.id); if (e.key === "Escape") cancelEdit(); }}
+                    style={{ ...inputStyle, flex: 1 }}
+                  />
+                  <button onClick={() => saveEdit(l.id)} disabled={editSaving} style={{ padding: "6px 14px", background: "var(--c-ok)", color: "white", border: "none", borderRadius: "6px", cursor: "pointer", fontSize: "13px", fontWeight: "600" }}>
+                    {editSaving ? "Saving..." : "Save"}
+                  </button>
+                  <button onClick={cancelEdit} style={{ padding: "6px 14px", background: "transparent", color: "var(--c-text-2)", border: "1px solid #334155", borderRadius: "6px", cursor: "pointer", fontSize: "13px" }}>
+                    Cancel
+                  </button>
+                </div>
+              );
+            }
+
+            return (
+              <div key={l.id} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                padding: "12px 16px", background: "var(--c-bg)", borderRadius: "8px", border: "1px solid var(--c-border)",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span style={{ color: "var(--c-text-4)", fontSize: "12px", fontFamily: "monospace" }}>#{i + 1}</span>
+                  <span style={{ color: "var(--c-text)", fontSize: "14px", fontWeight: "600" }}>{l.name}</span>
+                </div>
+                <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
+                  <button onClick={() => move(l.id, -1)} disabled={i === 0} style={{ padding: "5px 9px", background: "transparent", color: i === 0 ? "var(--c-text-4)" : "var(--c-text-2)", border: "1px solid #334155", borderRadius: "6px", cursor: i === 0 ? "not-allowed" : "pointer", fontSize: "12px" }}>↑</button>
+                  <button onClick={() => move(l.id, 1)} disabled={i === levels.length - 1} style={{ padding: "5px 9px", background: "transparent", color: i === levels.length - 1 ? "var(--c-text-4)" : "var(--c-text-2)", border: "1px solid #334155", borderRadius: "6px", cursor: i === levels.length - 1 ? "not-allowed" : "pointer", fontSize: "12px" }}>↓</button>
+                  <button onClick={() => startEdit(l)} style={{ padding: "5px 12px", background: "var(--c-accent-dk)", color: "var(--c-accent-lt)", border: "1px solid #0095da", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontWeight: "600" }}>
+                    Edit
+                  </button>
+                  <button onClick={() => remove(l.id)} style={{ padding: "5px 12px", background: "transparent", color: "var(--c-err)", border: "1px solid #ef4444", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontWeight: "600" }}>
+                    Delete
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Team tab (assign org members to project) ────────────────────────────────
 function MembersTab({ project, session, userRole, org }) {
   const [members, setMembers] = useState([]);
@@ -1629,8 +1778,8 @@ function GeneralTab({ project, onProjectRenamed }) {
 }
 
 // ── Main modal ─────────────────────────────────────────────────────────────
-const TABS = ["General", "Team", "Checklists", "Milestones"];
-const TAB_SHORT = ["General", "Team", "Lists", "Miles."];
+const TABS = ["General", "Team", "Checklists", "Milestones", "Levels"];
+const TAB_SHORT = ["General", "Team", "Lists", "Miles.", "Levels"];
 
 export default function ProjectSetupModal({ project, session, org, orgRole, userRole, onClose, onProjectRenamed }) {
   const isMobile = useIsMobile();
@@ -1689,6 +1838,7 @@ export default function ProjectSetupModal({ project, session, org, orgRole, user
           {tab === "Team" && <MembersTab project={project} session={session} userRole={userRole} org={org} />}
           {tab === "Checklists" && <ChecklistsTab project={project} userRole={userRole} />}
           {tab === "Milestones" && <MilestonesTab project={project} />}
+          {tab === "Levels" && <LevelsTab project={project} />}
         </div>
       </div>
     </div>
