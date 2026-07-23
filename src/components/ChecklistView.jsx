@@ -139,6 +139,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     setCategoryConfig(cfgMap);
     const ms = milestoneRes.data || [];
     setMilestones(ms);
+    let imIdMap = {};
+    let imCompletedMap = {}; // itemId → { [milestoneId]: { completedAt, completedBy } | null }
     if (ms.length > 0) {
       setActiveMilestoneId(ms[0].id);
       // Build itemId → [milestoneName] map for display
@@ -146,9 +148,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       const { data: miData } = await supabase.from("milestone_items")
         .select("milestone_id, checklist_item_id, days_before, completed_at, completed_by").in("milestone_id", msIds);
       const imMap = {};
-      const imIdMap = {};
       const imDaysMap = {}; // itemId → { [milestoneId]: days_before }
-      const imCompletedMap = {}; // itemId → { [milestoneId]: { completedAt, completedBy } | null }
       (miData || []).forEach(({ milestone_id, checklist_item_id, days_before, completed_at, completed_by }) => {
         if (!imMap[checklist_item_id]) imMap[checklist_item_id] = [];
         const msName = ms.find((m) => m.id === milestone_id)?.name;
@@ -166,6 +166,47 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       setItemMsIdMap(imIdMap);
       setItemMsDaysMap(imDaysMap);
       setItemMsCompletedMap(imCompletedMap);
+    } else {
+      setItemMsMap({});
+      setItemMsIdMap({});
+      setItemMsDaysMap({});
+      setItemMsCompletedMap({});
+    }
+
+    // Reconcile milestone-driven status: once a check has entered the milestone flow
+    // (complete/in_progress), its status must track whichever milestones are CURRENTLY
+    // assigned to it — milestones can be added, removed, or become newly due (a later
+    // milestone unlocks once the previous one's date has passed) after a user last set
+    // the status, so the stored value can go stale without this pass.
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const reconciled = [];
+    items.forEach((item) => {
+      if (item.status !== "complete" && item.status !== "in_progress") return;
+      const assignedIds = imIdMap[item.id] || [];
+      const completedMap = imCompletedMap[item.id] || {};
+      const assignedMs = assignedIds.map((id) => ms.find((m) => m.id === id)).filter(Boolean);
+      const dated = assignedMs.filter((m) => m.date).sort((a, b) => a.date.localeCompare(b.date));
+      const undated = assignedMs.filter((m) => !m.date);
+      const available = [];
+      for (let i = 0; i < dated.length; i++) {
+        const prev = i > 0 ? dated[i - 1] : null;
+        if (prev && today < new Date(prev.date + "T00:00:00")) break;
+        available.push(dated[i]);
+      }
+      available.push(...undated);
+      const effective = available.length > 0 && available.every((m) => completedMap[m.id]) ? "complete" : "in_progress";
+      if (effective !== item.status) reconciled.push({ item, effective });
+    });
+    if (reconciled.length > 0) {
+      const now = new Date().toISOString();
+      await Promise.all(reconciled.map(({ item, effective }) => {
+        const updates = effective === "complete"
+          ? { status: "complete", completed_by: null, completed_at: now, in_progress_by: null, in_progress_at: null }
+          : { status: "in_progress", completed_by: null, completed_at: null, in_progress_by: null, in_progress_at: null };
+        Object.assign(item, updates);
+        return supabase.from("checklists").update(updates).eq("id", item.id);
+      }));
+      setChecklists([...items]);
     }
     // Load item dependencies
     if (items.length > 0) {
@@ -258,7 +299,9 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   })();
 
   useEffect(() => {
-    if (!activeCategory && enabledCategories.length > 0) setActiveCategory(enabledCategories[0].id);
+    if (enabledCategories.length === 0) return;
+    const stillEnabled = activeCategory && enabledCategories.some((cat) => cat.id === activeCategory);
+    if (!stillEnabled) setActiveCategory(enabledCategories[0].id);
   }, [categoryConfig, loading]);
 
   // Gates ✓/▶/N/A status buttons — QAQC cannot change status
