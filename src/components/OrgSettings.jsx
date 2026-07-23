@@ -731,8 +731,15 @@ function ChecklistsTab({ org, orgRole }) {
 
   if (loading) return <p style={{ color: "var(--c-text-2)" }}>Loading...</p>;
 
+  // A standard category that's been disabled AND has no items left is treated as fully
+  // removed from the org's default checklists — not just temporarily toggled off — so it
+  // drops out of this list entirely instead of lingering as an empty "OFF" card. A category
+  // that's merely disabled while it still holds items (the normal, reversible OFF toggle)
+  // keeps showing up as before.
   const allCats = [
-    ...CATEGORIES.map((c) => ({ ...c, isCustom: false })),
+    ...CATEGORIES
+      .filter((c) => config[c.id]?.enabled !== false || (items[c.id]?.length ?? 0) > 0)
+      .map((c) => ({ ...c, isCustom: false })),
     ...customCats.map((c) => ({ id: c.id, label: config[c.id]?.label || c.label, isCustom: true })),
   ];
 
