@@ -26,6 +26,19 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const [filterMilestoneId, setFilterMilestoneId] = useState("all");
   const [filterApplicable, setFilterApplicable] = useState(false);
   const [helpPopover, setHelpPopover] = useState(null); // item.id
+  const [helpPopoverPos, setHelpPopoverPos] = useState(null); // { top, left, openUp } — viewport coords, computed on open
+
+  // Fixed-position popovers escape any ancestor's overflow:hidden (the rounded
+  // section cards clip absolutely-positioned children), but they don't track the
+  // button if the list scrolls underneath them — close on any scroll instead of
+  // letting them drift out of alignment. Capture phase so nested scroll
+  // containers (which don't bubble scroll events) are caught too.
+  useEffect(() => {
+    if (!helpPopover) return;
+    const close = () => { setHelpPopover(null); setHelpPopoverPos(null); };
+    window.addEventListener("scroll", close, true);
+    return () => window.removeEventListener("scroll", close, true);
+  }, [helpPopover]);
   const [itemMsIdMap, setItemMsIdMap] = useState({}); // itemId → [milestoneId, ...]
   const [qaqcThreads, setQaqcThreads] = useState([]);         // open: items with unresolved QA/QC flags
   const [resolvedQaqcThreads, setResolvedQaqcThreads] = useState([]); // items where all QA/QC flags resolved
@@ -1224,20 +1237,36 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
               );
             })()}
 
-            {/* Help popover button */}
+            {/* Help popover button — position:fixed (computed on open, below) so the
+                popover escapes the section card's overflow:hidden and the viewport
+                edges instead of being silently clipped. */}
             {item.help_text && (
               <div style={{ position: "relative", flexShrink: 0 }}>
-                <button onClick={() => setHelpPopover(isHelpOpen ? null : item.id)} title="More info" style={{
+                <button onClick={(e) => {
+                  if (isHelpOpen) { setHelpPopover(null); setHelpPopoverPos(null); return; }
+                  const popW = 280;
+                  const margin = 8;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const openUp = window.innerHeight - rect.bottom < 180 && rect.top > 180;
+                  let left = rect.right - popW;
+                  left = Math.max(margin, Math.min(left, window.innerWidth - popW - margin));
+                  const top = openUp ? rect.top - 6 : rect.bottom + 6;
+                  setHelpPopoverPos({ top, left, openUp, width: popW });
+                  setHelpPopover(item.id);
+                }} title="More info" style={{
                   background: isHelpOpen ? "var(--c-accent-dk)" : "transparent",
                   border: `1px solid ${isHelpOpen ? "var(--c-accent)" : "var(--c-border)"}`,
                   color: isHelpOpen ? "var(--c-accent-lt)" : "var(--c-text-3)",
                   borderRadius: "6px", padding: "4px 8px", fontSize: "13px", cursor: "pointer",
                 }}>ⓘ</button>
-                {isHelpOpen && (
+                {isHelpOpen && helpPopoverPos && (
                   <div style={{
-                    position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 100,
+                    position: "fixed", zIndex: 1000,
+                    top: helpPopoverPos.top, left: helpPopoverPos.left,
+                    transform: helpPopoverPos.openUp ? "translateY(-100%)" : "none",
                     background: "var(--c-surface)", border: "1px solid var(--c-accent)", borderRadius: "8px",
-                    padding: "10px 14px", width: "260px", fontSize: "12px", lineHeight: "1.5",
+                    padding: "10px 14px", width: helpPopoverPos.width, maxHeight: "min(320px, 70vh)", overflowY: "auto",
+                    fontSize: "12px", lineHeight: "1.5",
                     color: "var(--c-text-2)", boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
                   }}>
                     {item.help_text}
