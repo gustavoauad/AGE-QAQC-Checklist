@@ -50,8 +50,9 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const [savingItem, setSavingItem] = useState(null); // itemId currently being saved/removed
   const [projectLevels, setProjectLevels] = useState([]); // building levels, set up in Project Setup
   const [itemLevelCompletedMap, setItemLevelCompletedMap] = useState({}); // itemId → { [milestoneId]: { [levelId]: {completedAt, completedBy} | undefined } }
+  const [itemLevelNoMsMap, setItemLevelNoMsMap] = useState({}); // itemId → { [levelId]: {completedAt, completedBy} } — for level-based items with NO milestone assigned
   const [levelPopup, setLevelPopup] = useState(null); // { item } — per-level completion popup for level-based items
-  const [togglingLevel, setTogglingLevel] = useState(null); // `${milestoneId}:${levelId}` currently being toggled
+  const [togglingLevel, setTogglingLevel] = useState(null); // key of the level currently being toggled (milestone-scoped or flat)
 
   useEffect(() => { fetchAll(); }, []);
 
@@ -214,6 +215,21 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     }
     setItemLevelCompletedMap(ilcMap);
 
+    // Per-level completion for level-based items with NO milestone assigned — gates the
+    // item's own checklists.status directly instead of a milestone_items row.
+    let noMsMap = {}; // itemId → { [levelId]: {completedAt, completedBy} }
+    if (lvls.length > 0 && items.length > 0) {
+      const { data: cilData } = await supabase.from("checklist_item_levels")
+        .select("checklist_item_id, level_id, completed_at, completed_by")
+        .in("checklist_item_id", items.map((i) => i.id));
+      (cilData || []).forEach(({ checklist_item_id, level_id, completed_at, completed_by }) => {
+        if (!completed_at) return;
+        if (!noMsMap[checklist_item_id]) noMsMap[checklist_item_id] = {};
+        noMsMap[checklist_item_id][level_id] = { completedAt: completed_at, completedBy: completed_by };
+      });
+    }
+    setItemLevelNoMsMap(noMsMap);
+
     // A level-based item's milestone completion can go stale exactly like the status
     // reconciliation below (a level was added/removed since it was last fully checked,
     // or the item only just became level-based after already being marked done the old
@@ -243,6 +259,29 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       ));
     }
 
+    // Same reconciliation, for level-based items with NO milestone assigned — their
+    // status is derived directly from checklist_item_levels rather than a milestone.
+    const reconciledNoMs = [];
+    items.forEach((item) => {
+      if (!item.is_level_based || currentLevelIds.size < 2) return;
+      if ((imIdMap[item.id] || []).length > 0) return; // has a milestone — handled above instead
+      if (item.status !== "complete" && item.status !== "in_progress") return;
+      const doneLevels = noMsMap[item.id] || {};
+      const allDone = [...currentLevelIds].every((lid) => doneLevels[lid]);
+      const effective = allDone ? "complete" : "in_progress";
+      if (effective !== item.status) reconciledNoMs.push({ item, effective });
+    });
+    if (reconciledNoMs.length > 0) {
+      const now = new Date().toISOString();
+      await Promise.all(reconciledNoMs.map(({ item, effective }) => {
+        const updates = effective === "complete"
+          ? { status: "complete", completed_by: null, completed_at: now, in_progress_by: null, in_progress_at: null }
+          : { status: "in_progress", completed_by: null, completed_at: null, in_progress_by: null, in_progress_at: null };
+        Object.assign(item, updates);
+        return supabase.from("checklists").update(updates).eq("id", item.id);
+      }));
+    }
+
     // Reconcile milestone-driven status: once a check has entered the milestone flow
     // (complete/in_progress), its status must track whichever milestones are CURRENTLY
     // assigned to it — milestones can be added, removed, or become newly due (a later
@@ -253,6 +292,11 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     items.forEach((item) => {
       if (item.status !== "complete" && item.status !== "in_progress") return;
       const assignedIds = imIdMap[item.id] || [];
+      // Nothing to reconcile against for an item with no milestones assigned at all —
+      // without this, `available` below is always empty and `effective` always evaluates
+      // to "in_progress", silently downgrading every directly-completed, non-milestone
+      // item on each reload.
+      if (assignedIds.length === 0) return;
       const completedMap = imCompletedMap[item.id] || {};
       const assignedMs = assignedIds.map((id) => ms.find((m) => m.id === id)).filter(Boolean);
       const dated = assignedMs.filter((m) => m.date).sort((a, b) => a.date.localeCompare(b.date));
@@ -276,8 +320,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         Object.assign(item, updates);
         return supabase.from("checklists").update(updates).eq("id", item.id);
       }));
-      setChecklists([...items]);
     }
+    if (reconciled.length > 0 || reconciledNoMs.length > 0) setChecklists([...items]);
     // Load item dependencies
     if (items.length > 0) {
       const { data: depsData } = await supabase
@@ -481,9 +525,15 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   // and persists it (and the item's overall status) automatically, no separate step.
 
   // Aggregate done/total across every milestone this item is assigned to, for the
-  // small progress badge on the item row.
+  // small progress badge on the item row. With no milestone assigned, levels gate the
+  // item's own completion directly, so progress is just done-levels vs. total levels.
   const getLevelProgress = (item) => {
     const assignedIds = itemMsIdMap[item.id] || [];
+    if (assignedIds.length === 0) {
+      const doneLevels = itemLevelNoMsMap[item.id] || {};
+      const done = projectLevels.filter((lvl) => doneLevels[lvl.id]).length;
+      return { done, total: projectLevels.length };
+    }
     const total = assignedIds.length * projectLevels.length;
     let done = 0;
     assignedIds.forEach((msId) => {
@@ -574,6 +624,61 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
         if (newStatus === "complete") await removeSavedItemOnSelfComplete(item.id);
       }
+    }
+
+    setTogglingLevel(null);
+  };
+
+  // Same as toggleItemLevel, but for a level-based item with NO milestone assigned —
+  // levels gate the item's own status directly instead of a milestone_items row.
+  const toggleItemLevelNoMs = async (item, levelId) => {
+    const key = `noms:${levelId}`;
+    if (togglingLevel) return;
+    setTogglingLevel(key);
+    const wasDone = !!itemLevelNoMsMap[item.id]?.[levelId];
+    const now = new Date().toISOString();
+
+    await supabase.from("checklist_item_levels").upsert(
+      { checklist_item_id: item.id, level_id: levelId,
+        completed_at: wasDone ? null : now, completed_by: wasDone ? null : session.user.id },
+      { onConflict: "checklist_item_id,level_id" }
+    );
+
+    const nextMap = {
+      ...itemLevelNoMsMap,
+      [item.id]: { ...itemLevelNoMsMap[item.id], [levelId]: wasDone ? undefined : { completedAt: now, completedBy: session.user.id } },
+    };
+    setItemLevelNoMsMap(nextMap);
+
+    const doneLevels = nextMap[item.id] || {};
+    const allDone = projectLevels.length > 0 && projectLevels.every((lvl) => doneLevels[lvl.id]);
+    const someDone = projectLevels.some((lvl) => doneLevels[lvl.id]);
+    const newStatus = allDone ? "complete" : someDone ? "in_progress" : "pending";
+
+    if (newStatus === "complete" && item.status !== "complete") {
+      const parentIds = [...(itemDeps[item.id] || new Set())];
+      const incomplete = checklists.filter((c) => parentIds.includes(c.id) && c.status !== "complete" && c.status !== "na");
+      if (incomplete.length > 0) {
+        alert(
+          `Every level is checked, but this item can't be marked complete yet — the following ${incomplete.length === 1 ? "dependency" : "dependencies"} must be completed first:\n\n` +
+          incomplete.map((c) => `• ${refCodes[c.id] ? refCodes[c.id] + "  " : ""}${c.item_text}`).join("\n")
+        );
+        setTogglingLevel(null);
+        return;
+      }
+    }
+
+    if (newStatus !== item.status) {
+      const updates = {
+        status: newStatus,
+        completed_by: newStatus === "complete" ? session.user.id : null,
+        completed_at: newStatus === "complete" ? now : null,
+        in_progress_by: newStatus === "in_progress" ? session.user.id : null,
+        in_progress_at: newStatus === "in_progress" ? now : null,
+      };
+      await supabase.from("checklists").update(updates).eq("id", item.id);
+      setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
+      if (newStatus === "complete") await removeSavedItemOnSelfComplete(item.id);
     }
 
     setTogglingLevel(null);
@@ -1166,7 +1271,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   // With a single project level there's nothing to gate — completing
                   // it is equivalent to completing the whole item, so skip the level
                   // picker entirely and fall through to the normal milestone rules.
-                  const useLevelPopup = s === "complete" && item.is_level_based && assignedMsIds.length >= 1 && projectLevels.length >= 2;
+                  const useLevelPopup = s === "complete" && item.is_level_based && projectLevels.length >= 2;
                   const useMsPopup = !useLevelPopup && s === "complete" && assignedMsIds.length >= 2;
                   return (
                     <button key={s}
@@ -1225,11 +1330,12 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
             </button>
 
             {/* Level-based indicator — always visible when the item is flagged level-based,
-                regardless of milestone assignment, so it's never a mystery why a check
-                behaves differently. Its meaning depends on how many project levels exist:
-                0 → nothing to gate yet, flag the PM to set levels up; 1 → gating is moot,
-                shown for information only; 2+ → opens the per-level/per-milestone picker,
-                usable any time, not just when marking the check complete. */}
+                whether or not it has a milestone assigned, so it's never a mystery why a
+                check behaves differently. Its meaning depends on how many project levels
+                exist: 0 → nothing to gate yet, flag the PM to set levels up; 1 → gating is
+                moot, shown for information only; 2+ → opens the per-level completion
+                picker (grouped by milestone if any are assigned, flat otherwise), usable
+                any time, not just when marking the check complete. */}
             {item.is_level_based && (
               projectLevels.length === 0 ? (
                 <span title="This checklist item is level-based, but no project levels have been set up yet. Ask a PM to add levels in Project Setup → Levels."
@@ -1241,14 +1347,14 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   ⚠ 🏢 No levels set up
                 </span>
               ) : projectLevels.length === 1 ? (
-                <span title="Level-based, but with only one project level there's nothing to gate — completing it follows the normal milestone rules."
+                <span title="Level-based, but with only one project level there's nothing to gate — completing it follows the normal completion rules."
                   style={{
                     flexShrink: 0, background: "transparent", border: "1px solid var(--c-border)",
                     color: "var(--c-text-3)", borderRadius: "6px", padding: "4px 10px", fontSize: "11px", whiteSpace: "nowrap",
                   }}>
                   🏢 Level-based
                 </span>
-              ) : (itemMsIdMap[item.id] || []).length > 0 ? (() => {
+              ) : (() => {
                 const { done, total } = getLevelProgress(item);
                 const allDone = total > 0 && done === total;
                 return (
@@ -1262,15 +1368,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                     🏢 {done}/{total}
                   </button>
                 );
-              })() : (
-                <span title="Level-based, but this check isn't assigned to any milestone yet — level completion only applies once it is."
-                  style={{
-                    flexShrink: 0, background: "transparent", border: "1px solid var(--c-border)",
-                    color: "var(--c-text-3)", borderRadius: "6px", padding: "4px 10px", fontSize: "11px", whiteSpace: "nowrap",
-                  }}>
-                  🏢 Level-based
-                </span>
-              )
+              })()
             )}
 
             {/* Help popover button — position:fixed (computed on open, below) so the
@@ -2398,6 +2496,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           status, using the same rules as a normal multi-milestone completion. */}
       {levelPopup && (() => {
         const { item } = levelPopup;
+        const hasMilestones = (itemMsIdMap[item.id] || []).length > 0;
         const sortedMs = getSortedAssignedMilestones(item.id);
         const completedMap = itemMsCompletedMap[item.id] || {};
         const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -2407,6 +2506,10 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           const orderOk = idx === 0 || !!completedMap[sortedMs[idx - 1].id];
           return { ...m, eligible: dateOk && orderOk, dateOk, orderOk, prev };
         });
+        // No milestone assigned — levels gate the item's own completion directly, so
+        // show one flat list instead of a per-milestone breakdown.
+        const flatDoneLevels = itemLevelNoMsMap[item.id] || {};
+        const flatDoneCount = projectLevels.filter((l) => flatDoneLevels[l.id]).length;
         return (
           <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: "16px" }}
             onClick={() => setLevelPopup(null)}>
@@ -2417,6 +2520,33 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                 <p style={{ fontSize: "13px", color: "var(--c-warn)", margin: "0 0 14px" }}>
                   No project levels set up yet — go to Project Setup → Levels to add them.
                 </p>
+              ) : !hasMilestones ? (
+                <div style={{ marginBottom: "18px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                    <span style={{ fontSize: "12px", color: "var(--c-text-3)" }}>Not assigned to a milestone — completing every level marks the check itself complete.</span>
+                    <span style={{ fontSize: "11px", fontWeight: "700", color: flatDoneCount === projectLevels.length ? "var(--c-ok-text)" : "var(--c-text-3)", flexShrink: 0, marginLeft: "8px" }}>
+                      {flatDoneCount === projectLevels.length ? "✓ " : ""}{flatDoneCount}/{projectLevels.length}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                    {projectLevels.map((lvl) => {
+                      const isChecked = !!flatDoneLevels[lvl.id];
+                      const isToggling = togglingLevel === `noms:${lvl.id}`;
+                      return (
+                        <button key={lvl.id} onClick={() => toggleItemLevelNoMs(item, lvl.id)} disabled={isToggling}
+                          style={{
+                            padding: "5px 11px", borderRadius: "20px", fontSize: "12px", fontWeight: "600",
+                            border: `1px solid ${isChecked ? "var(--c-ok)" : "var(--c-border)"}`,
+                            background: isChecked ? "var(--c-ok-bg)" : "transparent",
+                            color: isChecked ? "var(--c-ok-text)" : "var(--c-text-3)",
+                            cursor: isToggling ? "not-allowed" : "pointer",
+                          }}>
+                          {isChecked ? "✓ " : ""}{lvl.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               ) : (
                 <div style={{ display: "grid", gap: "14px", marginBottom: "18px", maxHeight: "55vh", overflowY: "auto" }}>
                   {eligibility.map((ms) => {
