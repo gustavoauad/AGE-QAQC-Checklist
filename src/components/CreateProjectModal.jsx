@@ -105,7 +105,8 @@ export default function CreateProjectModal({ onClose, onCreated, userId, org }) 
     return rows;
   };
 
-  // Template copy (used when "use existing project as template" is checked)
+  // Template copy (used when "use existing project as template" is checked).
+  // Returns true on success, false if any part of the copy failed.
   const applyTemplate = async (newProjectId, templateId) => {
     setProgressStep("Copying template configuration…");
     const [{ data: cfgs }, { data: customItems }, { data: milestones }] = await Promise.all([
@@ -139,43 +140,52 @@ export default function CreateProjectModal({ onClose, onCreated, userId, org }) 
         )
       );
     }
-    await Promise.all(insertPromises);
+    const insertResults = await Promise.all(insertPromises);
+    if (insertResults.some((r) => r.error)) return false;
 
     if (milestones?.length) {
       setProgressStep("Copying milestones…");
-      const { data: newMilestones } = await supabase
+      const { data: newMilestones, error: msInsertErr } = await supabase
         .from("project_milestones")
         .insert(milestones.map((m) => ({
           project_id: newProjectId, name: m.name, date: m.date,
           days_before_alert: m.days_before_alert,
         })))
         .select();
+      if (msInsertErr) return false;
 
       if (newMilestones?.length) {
         const nameToNewId = {};
         newMilestones.forEach((m) => { nameToNewId[m.name] = m.id; });
 
-        await Promise.all(milestones.map(async (oldMs) => {
+        const milestoneResults = await Promise.all(milestones.map(async (oldMs) => {
           const newMsId = nameToNewId[oldMs.name];
-          if (!newMsId) return;
-          const { data: msItems } = await supabase
+          if (!newMsId) return true;
+          const { data: msItems, error: msItemsErr } = await supabase
             .from("milestone_items").select("checklist_item_id").eq("milestone_id", oldMs.id);
-          if (!msItems?.length) return;
-          const { data: oldItems } = await supabase
+          if (msItemsErr) return false;
+          if (!msItems?.length) return true;
+          const { data: oldItems, error: oldItemsErr } = await supabase
             .from("checklists").select("id, item_id")
             .in("id", msItems.map((r) => r.checklist_item_id));
+          if (oldItemsErr) return false;
           const itemIds = (oldItems || []).map((i) => i.item_id);
-          if (!itemIds.length) return;
-          const { data: newItems } = await supabase
+          if (!itemIds.length) return true;
+          const { data: newItems, error: newItemsErr } = await supabase
             .from("checklists").select("id").eq("project_id", newProjectId).in("item_id", itemIds);
+          if (newItemsErr) return false;
           if (newItems?.length) {
-            await supabase.from("milestone_items").insert(
+            const { error: miErr } = await supabase.from("milestone_items").insert(
               newItems.map((i) => ({ milestone_id: newMsId, checklist_item_id: i.id }))
             );
+            if (miErr) return false;
           }
+          return true;
         }));
+        if (milestoneResults.some((ok) => !ok)) return false;
       }
     }
+    return true;
   };
 
   const handleCreate = async (e) => {
@@ -231,7 +241,12 @@ export default function CreateProjectModal({ onClose, onCreated, userId, org }) 
     setProgressPct(85);
 
     if (useTemplate && templateProjectId) {
-      await applyTemplate(project.id, templateProjectId);
+      const templateOk = await applyTemplate(project.id, templateProjectId);
+      if (!templateOk) {
+        setError("Project was created, but copying the template failed partway through — check its checklist/milestone config in Project Setup.");
+        setLoading(false); setProgressPct(0); onCreated();
+        return;
+      }
     }
 
     setProgressPct(100);

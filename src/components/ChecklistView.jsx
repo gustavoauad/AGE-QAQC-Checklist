@@ -4,9 +4,11 @@ import { CATEGORIES } from "../checklistTemplate";
 import { useIsMobile } from "../useIsMobile";
 import AgeLogo from "./AgeLogo";
 import NotificationBell from "./NotificationBell";
+import Toast, { useToast } from "./Toast";
 
 export default function ChecklistView({ project, userRole, session, onBack, onSignOut, onGoToProjects, onOpenSetup, refreshSignal }) {
   const isMobile = useIsMobile();
+  const [toast, showToast] = useToast();
   const [checklists, setChecklists] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeCategory, setActiveCategory] = useState(null);
@@ -141,21 +143,24 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
 
   const fetchAll = async () => {
     setLoading(true);
+    let hadFetchError = false;
     const [checklistRes, configRes, memberRes, milestoneRes] = await Promise.all([
       supabase.from("checklists").select("*").eq("project_id", project.id).order("category").order("sort_order", { nullsFirst: false }).order("item_id"),
       supabase.from("project_checklist_config").select("*").eq("project_id", project.id),
       supabase.from("project_members").select("user_id").eq("project_id", project.id),
       supabase.from("project_milestones").select("*").eq("project_id", project.id).order("date"),
     ]);
+    if (checklistRes.error || configRes.error || memberRes.error || milestoneRes.error) hadFetchError = true;
     const items = checklistRes.data || [];
     if (!checklistRes.error) setChecklists(items);
 
     // Fetch comment metadata (count + QAQC flag) for all items upfront
     if (items.length > 0) {
-      const { data: cmData } = await supabase
+      const { data: cmData, error: cmErr } = await supabase
         .from("checklist_comments")
         .select("checklist_item_id, is_qaqc_flagged")
         .in("checklist_item_id", items.map((c) => c.id));
+      if (cmErr) hadFetchError = true;
       const meta = {};
       (cmData || []).forEach((c) => {
         if (!meta[c.checklist_item_id]) meta[c.checklist_item_id] = { count: 0, hasQaqc: false };
@@ -175,8 +180,9 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       setActiveMilestoneId(ms[0].id);
       // Build itemId → [milestoneName] map for display
       const msIds = ms.map((m) => m.id);
-      const { data: miData } = await supabase.from("milestone_items")
+      const { data: miData, error: miErr } = await supabase.from("milestone_items")
         .select("milestone_id, checklist_item_id, days_before, completed_at, completed_by").in("milestone_id", msIds);
+      if (miErr) hadFetchError = true;
       const imMap = {};
       const imDaysMap = {}; // itemId → { [milestoneId]: days_before }
       (miData || []).forEach(({ milestone_id, checklist_item_id, days_before, completed_at, completed_by }) => {
@@ -208,14 +214,16 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     // checked here — that's what lets every other rule below (and the existing due-date/
     // dashboard/effective-status logic) keep treating milestone_items.completed_at as
     // ground truth without any further changes.
-    const { data: levelsData } = await supabase.from("project_levels").select("*").eq("project_id", project.id).order("sort_order");
+    const { data: levelsData, error: levelsErr } = await supabase.from("project_levels").select("*").eq("project_id", project.id).order("sort_order");
+    if (levelsErr) hadFetchError = true;
     const lvls = levelsData || [];
     setProjectLevels(lvls);
     let ilcMap = {}; // itemId → { [milestoneId]: { [levelId]: {completedAt, completedBy} } }
     if (ms.length > 0 && lvls.length > 0) {
       const msIds = ms.map((m) => m.id);
-      const { data: milData } = await supabase.from("milestone_item_levels")
+      const { data: milData, error: milErr } = await supabase.from("milestone_item_levels")
         .select("milestone_id, checklist_item_id, level_id, completed_at, completed_by").in("milestone_id", msIds);
+      if (milErr) hadFetchError = true;
       (milData || []).forEach(({ milestone_id, checklist_item_id, level_id, completed_at, completed_by }) => {
         if (!completed_at) return;
         if (!ilcMap[checklist_item_id]) ilcMap[checklist_item_id] = {};
@@ -229,9 +237,10 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     // item's own checklists.status directly instead of a milestone_items row.
     let noMsMap = {}; // itemId → { [levelId]: {completedAt, completedBy} }
     if (lvls.length > 0 && items.length > 0) {
-      const { data: cilData } = await supabase.from("checklist_item_levels")
+      const { data: cilData, error: cilErr } = await supabase.from("checklist_item_levels")
         .select("checklist_item_id, level_id, completed_at, completed_by")
         .in("checklist_item_id", items.map((i) => i.id));
+      if (cilErr) hadFetchError = true;
       (cilData || []).forEach(({ checklist_item_id, level_id, completed_at, completed_by }) => {
         if (!completed_at) return;
         if (!noMsMap[checklist_item_id]) noMsMap[checklist_item_id] = {};
@@ -334,10 +343,11 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     if (reconciled.length > 0 || reconciledNoMs.length > 0) setChecklists([...items]);
     // Load item dependencies
     if (items.length > 0) {
-      const { data: depsData } = await supabase
+      const { data: depsData, error: depsErr } = await supabase
         .from("checklist_item_dependencies")
         .select("item_id, depends_on_item_id")
         .in("item_id", items.map((c) => c.id));
+      if (depsErr) hadFetchError = true;
       const dMap = {};
       (depsData || []).forEach(({ item_id, depends_on_item_id }) => {
         if (!dMap[item_id]) dMap[item_id] = new Set();
@@ -348,7 +358,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
 
     const userIds = (memberRes.data || []).map((r) => r.user_id);
     if (userIds.length > 0) {
-      const { data: profiles } = await supabase.from("profiles").select("id, full_name").in("id", userIds);
+      const { data: profiles, error: profErr } = await supabase.from("profiles").select("id, full_name").in("id", userIds);
+      if (profErr) hadFetchError = true;
       const pMap = {};
       (profiles || []).forEach((p) => { pMap[p.id] = p; });
       const { data: myProfile } = await supabase.from("profiles").select("id, full_name").eq("id", session.user.id).single();
@@ -360,11 +371,12 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     // A save that has since been self-completed is stale (rule: completing a saved
     // check removes it from the To-Do list), so drop those here too, in case they were
     // completed from a different device/session and this client never got to react live.
-    const { data: savedRows } = await supabase
+    const { data: savedRows, error: savedErr } = await supabase
       .from("checklist_saved_items")
       .select("checklist_item_id")
       .eq("project_id", project.id)
       .eq("user_id", session.user.id);
+    if (savedErr) hadFetchError = true;
     const savedIds = new Set((savedRows || []).map((r) => r.checklist_item_id));
     const staleSelfCompleted = [...savedIds].filter((id) => {
       const item = items.find((c) => c.id === id);
@@ -376,6 +388,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     }
     setSavedItemIds(savedIds);
 
+    if (hadFetchError) showToast("error", "Some checklist data failed to load — try reloading the page.");
     setLoading(false);
   };
 
@@ -386,12 +399,14 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     setSavingItem(item.id);
     const isSaved = savedItemIds.has(item.id);
     if (isSaved) {
-      await supabase.from("checklist_saved_items").delete().eq("user_id", session.user.id).eq("checklist_item_id", item.id);
-      setSavedItemIds((prev) => { const next = new Set(prev); next.delete(item.id); return next; });
+      const { error } = await supabase.from("checklist_saved_items").delete().eq("user_id", session.user.id).eq("checklist_item_id", item.id);
+      if (error) showToast("error", "Couldn't remove from To-Do — try again.");
+      else setSavedItemIds((prev) => { const next = new Set(prev); next.delete(item.id); return next; });
     } else {
       const { error } = await supabase.from("checklist_saved_items")
         .insert({ user_id: session.user.id, checklist_item_id: item.id, project_id: project.id });
-      if (!error) setSavedItemIds((prev) => new Set(prev).add(item.id));
+      if (error) showToast("error", "Couldn't save to To-Do — try again.");
+      else setSavedItemIds((prev) => new Set(prev).add(item.id));
     }
     setSavingItem(null);
   };
@@ -566,11 +581,12 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     const wasDone = !!itemLevelCompletedMap[item.id]?.[milestoneId]?.[levelId];
     const now = new Date().toISOString();
 
-    await supabase.from("milestone_item_levels").upsert(
+    const { error: levelErr } = await supabase.from("milestone_item_levels").upsert(
       { milestone_id: milestoneId, checklist_item_id: item.id, level_id: levelId,
         completed_at: wasDone ? null : now, completed_by: wasDone ? null : session.user.id },
       { onConflict: "milestone_id,checklist_item_id,level_id" }
     );
+    if (levelErr) { showToast("error", "Couldn't save that level — try again."); setTogglingLevel(null); return; }
 
     const nextLevelMap = {
       ...itemLevelCompletedMap,
@@ -604,9 +620,10 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     }
 
     if (nowAllDone !== wasMilestoneComplete) {
-      await supabase.from("milestone_items")
+      const { error: msErr } = await supabase.from("milestone_items")
         .update({ completed_at: nowAllDone ? now : null, completed_by: nowAllDone ? session.user.id : null })
         .eq("milestone_id", milestoneId).eq("checklist_item_id", item.id);
+      if (msErr) { showToast("error", "Level saved, but the milestone status couldn't be updated — try again."); setTogglingLevel(null); return; }
 
       const nextMsCompletedMap = {
         ...itemMsCompletedMap,
@@ -630,7 +647,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           in_progress_by: newStatus === "in_progress" ? session.user.id : null,
           in_progress_at: newStatus === "in_progress" ? now : null,
         };
-        await supabase.from("checklists").update(updates).eq("id", item.id);
+        const { error: statusErr } = await supabase.from("checklists").update(updates).eq("id", item.id);
+        if (statusErr) { showToast("error", "Level saved, but the item status couldn't be updated — try again."); setTogglingLevel(null); return; }
         setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
         if (newStatus === "complete") await removeSavedItemOnSelfComplete(item.id);
       }
@@ -648,11 +666,12 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     const wasDone = !!itemLevelNoMsMap[item.id]?.[levelId];
     const now = new Date().toISOString();
 
-    await supabase.from("checklist_item_levels").upsert(
+    const { error: levelErr } = await supabase.from("checklist_item_levels").upsert(
       { checklist_item_id: item.id, level_id: levelId,
         completed_at: wasDone ? null : now, completed_by: wasDone ? null : session.user.id },
       { onConflict: "checklist_item_id,level_id" }
     );
+    if (levelErr) { showToast("error", "Couldn't save that level — try again."); setTogglingLevel(null); return; }
 
     const nextMap = {
       ...itemLevelNoMsMap,
@@ -686,7 +705,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         in_progress_by: newStatus === "in_progress" ? session.user.id : null,
         in_progress_at: newStatus === "in_progress" ? now : null,
       };
-      await supabase.from("checklists").update(updates).eq("id", item.id);
+      const { error: statusErr } = await supabase.from("checklists").update(updates).eq("id", item.id);
+      if (statusErr) { showToast("error", "Level saved, but the item status couldn't be updated — try again."); setTogglingLevel(null); return; }
       setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
       if (newStatus === "complete") await removeSavedItemOnSelfComplete(item.id);
     }
@@ -755,12 +775,15 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     const assignedMsIds = itemMsIdMap[itemId] || [];
     if (!assignedMsIds.length) return;
     const now = new Date().toISOString();
-    await Promise.all(assignedMsIds.map((msId) => {
+    const results = await Promise.all(assignedMsIds.map((msId) => {
       const isDone = msDone && (selectedIds === null || selectedIds.has(msId));
       return supabase.from("milestone_items")
         .update({ completed_at: isDone ? now : null, completed_by: isDone ? session.user.id : null })
         .eq("checklist_item_id", itemId).eq("milestone_id", msId);
     }));
+    if (results.some((r) => r.error)) {
+      showToast("error", "Status saved, but one or more milestone deadlines couldn't be updated.");
+    }
     setItemMsCompletedMap((prev) => {
       const next = { ...prev, [itemId]: { ...(prev[itemId] || {}) } };
       assignedMsIds.forEach((msId) => {
@@ -774,7 +797,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   // Rule: completing a check removes it from the completing user's own To-Do list.
   const removeSavedItemOnSelfComplete = async (itemId) => {
     if (!savedItemIds.has(itemId)) return;
-    await supabase.from("checklist_saved_items").delete().eq("user_id", session.user.id).eq("checklist_item_id", itemId);
+    const { error } = await supabase.from("checklist_saved_items").delete().eq("user_id", session.user.id).eq("checklist_item_id", itemId);
+    if (error) return; // non-critical housekeeping — leaving a completed item on the To-Do list is harmless
     setSavedItemIds((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
   };
 
@@ -817,7 +841,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         );
         if (!ok) return;
         const naUpdates = { status: "na", completed_by: null, completed_at: null, in_progress_by: null, in_progress_at: null };
-        await Promise.all(toNa.map((c) => supabase.from("checklists").update(naUpdates).eq("id", c.id)));
+        const naResults = await Promise.all(toNa.map((c) => supabase.from("checklists").update(naUpdates).eq("id", c.id)));
+        if (naResults.some((r) => r.error)) { showToast("error", "Couldn't cascade N/A to all dependent items — try again."); return; }
         setChecklists((prev) => prev.map((c) => toNa.find((x) => x.id === c.id) ? { ...c, ...naUpdates } : c));
         await Promise.all(toNa.map((c) => syncMilestoneCompletion(c.id, false)));
       }
@@ -836,7 +861,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       });
       if (toRevert.length > 0) {
         const revertUpdates = { status: "pending", completed_by: null, completed_at: null, in_progress_by: null, in_progress_at: null };
-        await Promise.all(toRevert.map((c) => supabase.from("checklists").update(revertUpdates).eq("id", c.id)));
+        const revertResults = await Promise.all(toRevert.map((c) => supabase.from("checklists").update(revertUpdates).eq("id", c.id)));
+        if (revertResults.some((r) => r.error)) { showToast("error", "Couldn't revert all dependent items — try again."); return; }
         setChecklists((prev) => prev.map((c) => toRevert.find((x) => x.id === c.id) ? { ...c, ...revertUpdates } : c));
         await Promise.all(toRevert.map((c) => syncMilestoneCompletion(c.id, false)));
       }
@@ -852,7 +878,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       in_progress_at: newStatus === "in_progress" ? now : null,
     };
     const { error } = await supabase.from("checklists").update(updates).eq("id", item.id);
-    if (error) { console.error("Status update failed:", error.message); setUpdating(null); return; }
+    if (error) { showToast("error", "Couldn't update status — try again."); setUpdating(null); return; }
     setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
     // Direct button clicks are all-or-nothing: mirror the resulting status onto every
     // assigned milestone. Partial (some-milestones-done) state can only be produced
@@ -929,7 +955,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       in_progress_at: newStatus === "in_progress" ? now : null,
     };
     const { error } = await supabase.from("checklists").update(updates).eq("id", item.id);
-    if (error) { console.error("Milestone completion update failed:", error.message); setUpdating(null); return; }
+    if (error) { showToast("error", "Couldn't update milestone completion — try again."); setUpdating(null); return; }
     setChecklists((prev) => prev.map((c) => c.id === item.id ? { ...c, ...updates } : c));
     await syncMilestoneCompletion(item.id, true, selectedIds);
     if (newStatus === "complete") await removeSavedItemOnSelfComplete(item.id);
@@ -939,7 +965,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
 
   const fetchComments = async (itemId) => {
     if (commentsCache[itemId]) return;
-    const { data } = await supabase.from("checklist_comments").select("*").eq("checklist_item_id", itemId).order("created_at");
+    const { data, error } = await supabase.from("checklist_comments").select("*").eq("checklist_item_id", itemId).order("created_at");
+    if (error) { showToast("error", "Couldn't load comments — try again."); return; }
     const userIds = [...new Set((data || []).map((c) => c.user_id))];
     const pMap = { ...profilesMap };
     const missing = userIds.filter((id) => !pMap[id]);
@@ -975,6 +1002,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       if (data.is_qaqc_flagged) { setQaqcAlertsLoaded(false); loadQaqcAlerts(true); }
       else setQaqcAlertsLoaded(false);
       setCommentText("");
+    } else {
+      showToast("error", "Couldn't post comment — try again.");
     }
     setAddingComment(false);
   };
@@ -985,22 +1014,24 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     if (!itemIds.length) { setQaqcAlertsLoaded(true); return; }
 
     // Find all items that have at least one qaqc-flagged comment
-    const { data: flagged } = await supabase
+    const { data: flagged, error: flaggedErr } = await supabase
       .from("checklist_comments")
       .select("checklist_item_id")
       .eq("is_qaqc_flagged", true)
       .in("checklist_item_id", itemIds);
+    if (flaggedErr) { showToast("error", "Couldn't load QA/QC alerts — try again."); setQaqcAlertsLoaded(true); return; }
     const alertItemIds = [...new Set((flagged || []).map((c) => c.checklist_item_id))];
     if (!alertItemIds.length) {
       setQaqcThreads([]); setResolvedQaqcThreads([]); setQaqcAlertsLoaded(true); return;
     }
 
     // Fetch full comment threads for those items
-    const { data: allComments } = await supabase
+    const { data: allComments, error: threadsErr } = await supabase
       .from("checklist_comments")
       .select("*")
       .in("checklist_item_id", alertItemIds)
       .order("created_at");
+    if (threadsErr) { showToast("error", "Couldn't load QA/QC alert threads — try again."); setQaqcAlertsLoaded(true); return; }
 
     const itemsById = Object.fromEntries(checklists.map((c) => [c.id, c]));
     const threadsMap = {};
@@ -1033,7 +1064,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       .from("checklist_comments")
       .update({ is_resolved: true, resolved_at: new Date().toISOString(), resolved_by: session.user.id })
       .eq("id", commentId);
-    if (!error) { setQaqcAlertsLoaded(false); await loadQaqcAlerts(true); }
+    if (error) { showToast("error", "Couldn't resolve alert — try again."); return; }
+    setQaqcAlertsLoaded(false); await loadQaqcAlerts(true);
   };
 
   const unresolveAlert = async (commentId) => {
@@ -1041,7 +1073,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       .from("checklist_comments")
       .update({ is_resolved: false, resolved_at: null, resolved_by: null })
       .eq("id", commentId);
-    if (!error) { setQaqcAlertsLoaded(false); await loadQaqcAlerts(true); }
+    if (error) { showToast("error", "Couldn't reopen alert — try again."); return; }
+    setQaqcAlertsLoaded(false); await loadQaqcAlerts(true);
   };
 
   const submitDashReply = async (itemId) => {
@@ -1064,6 +1097,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       // them made the "No alerts — all clear!" empty state flash on screen until the
       // refetch finished, even though nothing had actually been resolved.
       await loadQaqcAlerts(true);
+    } else {
+      showToast("error", "Couldn't post reply — try again.");
     }
     setDashReplying(null);
   };
@@ -1088,6 +1123,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
         return { ...prev, [itemId]: { count: newCount, hasQaqc: stillHasQaqc } };
       });
       if (deletedComment?.is_qaqc_flagged) setQaqcAlertsLoaded(false);
+    } else {
+      showToast("error", "Couldn't delete comment — try again.");
     }
   };
 
@@ -1626,6 +1663,7 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--c-bg)", fontFamily: "Manrope, sans-serif", display: "flex", flexDirection: "column" }}>
+      <Toast toast={toast} />
 
       {/* Header */}
       <div style={{ background: "var(--c-surface)", borderBottom: "1px solid #334155", padding: isMobile ? "12px 16px" : "16px 24px" }}>

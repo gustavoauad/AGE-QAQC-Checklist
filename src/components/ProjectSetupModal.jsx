@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabase";
 import { CATEGORIES } from "../checklistTemplate";
 import { useIsMobile } from "../useIsMobile";
+import Toast, { useToast } from "./Toast";
 
 const inputStyle = {
   width: "100%", padding: "10px 12px", background: "var(--c-bg)",
@@ -37,7 +38,7 @@ function buildSortOrder(catItems, sectionOrder) {
   return out;
 }
 
-function ChecklistsTab({ project, userRole }) {
+function ChecklistsTab({ project, userRole, showToast }) {
   const isMobile = useIsMobile();
   const canEdit = userRole === "project_manager" || userRole === "qaqc";
   const [config, setConfig] = useState({});
@@ -193,29 +194,32 @@ function ChecklistsTab({ project, userRole }) {
   const toggle = async (catId) => {
     if (!canEdit) return;
     const newEnabled = !(config[catId]?.enabled !== false);
-    setConfig((p) => ({ ...p, [catId]: { ...p[catId], enabled: newEnabled } }));
-    await supabase.from("project_checklist_config").upsert(
+    const { error } = await supabase.from("project_checklist_config").upsert(
       { project_id: project.id, category: catId, enabled: newEnabled, label: config[catId]?.label || null },
       { onConflict: "project_id,category" }
     );
+    if (error) { showToast("error", "Couldn't update checklist visibility — try again."); return; }
+    setConfig((p) => ({ ...p, [catId]: { ...p[catId], enabled: newEnabled } }));
   };
 
   const saveRename = async (catId) => {
     if (!renameCatText.trim()) { setRenamingCat(null); return; }
-    await supabase.from("project_checklist_config").upsert(
+    const { error } = await supabase.from("project_checklist_config").upsert(
       { project_id: project.id, category: catId, label: renameCatText.trim(), enabled: config[catId]?.enabled !== false },
       { onConflict: "project_id,category" }
     );
+    if (error) { showToast("error", "Couldn't rename checklist — try again."); return; }
     setConfig((p) => ({ ...p, [catId]: { ...p[catId], label: renameCatText.trim() } }));
     setRenamingCat(null);
   };
 
   const saveAbbr = async (catId) => {
     const val = abbrDraft.trim();
-    await supabase.from("project_checklist_config").upsert(
+    const { error } = await supabase.from("project_checklist_config").upsert(
       { project_id: project.id, category: catId, abbreviation: val || null, label: config[catId]?.label || null, enabled: config[catId]?.enabled !== false },
       { onConflict: "project_id,category" }
     );
+    if (error) { showToast("error", "Couldn't save abbreviation — try again."); return; }
     setConfig((p) => ({ ...p, [catId]: { ...p[catId], abbreviation: val || null } }));
     setAbbrEditing(null);
   };
@@ -224,7 +228,8 @@ function ChecklistsTab({ project, userRole }) {
     if (!newCatName.trim()) return;
     setSavingCat(true);
     const catId = `proj_custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    await supabase.from("project_checklist_config").insert({ project_id: project.id, category: catId, label: newCatName.trim(), enabled: true, is_custom: true });
+    const { error } = await supabase.from("project_checklist_config").insert({ project_id: project.id, category: catId, label: newCatName.trim(), enabled: true, is_custom: true });
+    if (error) { showToast("error", "Couldn't create checklist — try again."); setSavingCat(false); return; }
     setConfig((p) => ({ ...p, [catId]: { enabled: true, label: newCatName.trim(), is_custom: true } }));
     setItems((p) => ({ ...p, [catId]: [] }));
     setSections((p) => ({ ...p, [catId]: [] }));
@@ -233,10 +238,11 @@ function ChecklistsTab({ project, userRole }) {
 
   const deleteCustomCat = async (catId) => {
     if (!window.confirm("Delete this checklist and all its items? This cannot be undone.")) return;
-    await Promise.all([
+    const results = await Promise.all([
       supabase.from("checklists").delete().eq("project_id", project.id).eq("category", catId),
       supabase.from("project_checklist_config").delete().eq("project_id", project.id).eq("category", catId),
     ]);
+    if (results.some((r) => r.error)) { showToast("error", "Couldn't delete checklist — try again."); return; }
     setConfig((p) => { const n = { ...p }; delete n[catId]; return n; });
     setItems((p) => { const n = { ...p }; delete n[catId]; return n; });
     setSections((p) => { const n = { ...p }; delete n[catId]; return n; });
@@ -247,14 +253,16 @@ function ChecklistsTab({ project, userRole }) {
     const text = editItemText.trim();
     if (!text) { setEditingItemId(null); return; }
     if (text === item.item_text) { setEditingItemId(null); return; }
-    await supabase.from("checklists").update({ item_text: text, edited_by_pm: true }).eq("id", item.id);
+    const { error } = await supabase.from("checklists").update({ item_text: text, edited_by_pm: true }).eq("id", item.id);
+    if (error) { showToast("error", "Couldn't save item text — try again."); return; }
     setItems((p) => ({ ...p, [item.category]: p[item.category].map((i) => i.id === item.id ? { ...i, item_text: text, edited_by_pm: true } : i) }));
     setEditingItemId(null);
   };
 
   const saveTooltip = async (item) => {
     const val = tooltipDraft.trim() || null;
-    await supabase.from("checklists").update({ help_text: val }).eq("id", item.id);
+    const { error } = await supabase.from("checklists").update({ help_text: val }).eq("id", item.id);
+    if (error) { showToast("error", "Couldn't save help text — try again."); return; }
     setItems((p) => ({ ...p, [item.category]: p[item.category].map((i) => i.id === item.id ? { ...i, help_text: val } : i) }));
     setTooltipEditing(null);
   };
@@ -284,13 +292,14 @@ function ChecklistsTab({ project, userRole }) {
     if (validationError) { alert(validationError); return; }
     const targets = itemIds.filter((id) => itemMilestones[id]?.has(milestoneId));
     if (!targets.length) return;
-    await Promise.all(targets.map((id) =>
+    const results = await Promise.all(targets.map((id) =>
       supabase.from("milestone_items")
         .upsert(
           { checklist_item_id: id, milestone_id: milestoneId, days_before: days },
           { onConflict: "checklist_item_id,milestone_id" }
         )
     ));
+    if (results.some((r) => r.error)) { showToast("error", "Couldn't save deadline — try again."); return; }
     setItemMilestoneDays((prev) => {
       const next = { ...prev };
       targets.forEach((id) => {
@@ -336,11 +345,11 @@ function ChecklistsTab({ project, userRole }) {
     if (add) {
       const { error } = await supabase.from("checklist_item_dependencies")
         .upsert({ item_id: itemId, depends_on_item_id: depOnId }, { onConflict: "item_id,depends_on_item_id" });
-      if (error) { console.error("dependency insert failed:", error); revert(); alert("Could not save dependency: " + error.message); }
+      if (error) { revert(); showToast("error", "Could not save dependency: " + error.message); }
     } else {
       const { error } = await supabase.from("checklist_item_dependencies").delete()
         .eq("item_id", itemId).eq("depends_on_item_id", depOnId);
-      if (error) { console.error("dependency delete failed:", error); revert(); alert("Could not remove dependency: " + error.message); }
+      if (error) { revert(); showToast("error", "Could not remove dependency: " + error.message); }
     }
   };
 
@@ -383,19 +392,20 @@ function ChecklistsTab({ project, userRole }) {
     // assigned to that milestone later — even ones with no items on it today —
     // inherit this days_before instead of starting with no deadline.
     if (type === "cat") {
-      await Promise.all(Object.entries(msInputs).map(async ([msId, val]) => {
+      const defResults = await Promise.all(Object.entries(msInputs).map(async ([msId, val]) => {
         const days = val === "" ? null : parseInt(val, 10);
-        if (val !== "" && (isNaN(days) || days < 0)) return;
+        if (val !== "" && (isNaN(days) || days < 0)) return { error: null };
         if (days == null) {
-          await supabase.from("project_checklist_milestone_defaults").delete()
+          return supabase.from("project_checklist_milestone_defaults").delete()
             .eq("category", catId).eq("milestone_id", msId);
         } else {
-          await supabase.from("project_checklist_milestone_defaults").upsert(
+          return supabase.from("project_checklist_milestone_defaults").upsert(
             { project_id: project.id, category: catId, milestone_id: msId, days_before: days },
             { onConflict: "category,milestone_id" }
           );
         }
       }));
+      if (defResults.some((r) => r.error)) showToast("error", "Deadlines saved, but the checklist-wide defaults couldn't be updated.");
       setCatMilestoneDefaults((prev) => {
         const next = { ...prev, [catId]: { ...(prev[catId] || {}) } };
         Object.entries(msInputs).forEach(([msId, val]) => {
@@ -411,7 +421,8 @@ function ChecklistsTab({ project, userRole }) {
 
   const removeItem = async (item) => {
     if (!window.confirm("Remove this item from the checklist?")) return;
-    await supabase.from("checklists").delete().eq("id", item.id);
+    const { error } = await supabase.from("checklists").delete().eq("id", item.id);
+    if (error) { showToast("error", "Couldn't remove item — try again."); return; }
     setItems((p) => ({ ...p, [item.category]: p[item.category].filter((i) => i.id !== item.id) }));
   };
 
@@ -419,12 +430,13 @@ function ChecklistsTab({ project, userRole }) {
     if (!newItemText.trim()) return;
     const catItems = items[catId] || [];
     const maxOrder = catItems.reduce((m, i) => Math.max(m, i.sort_order ?? 0), -1);
-    const { data: newItem } = await supabase.from("checklists").insert({
+    const { data: newItem, error } = await supabase.from("checklists").insert({
       project_id: project.id,
       item_id: `custom_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       category: catId, sub_section: section || null, item_text: newItemText.trim(),
       status: "pending", sort_order: maxOrder + 1, is_custom: true,
     }).select().single();
+    if (error) { showToast("error", "Couldn't add item — try again."); return; }
     if (newItem) {
       setItems((p) => ({ ...p, [catId]: [...(p[catId] || []), newItem] }));
       if (section && !(sections[catId] || []).includes(section))
@@ -445,7 +457,10 @@ function ChecklistsTab({ project, userRole }) {
     const newLabel = renameSectionText.trim();
     if (!newLabel || newLabel === oldLabel) { setRenamingSection(null); return; }
     const ids = (items[catId] || []).filter((i) => i.sub_section === oldLabel).map((i) => i.id);
-    if (ids.length) await supabase.from("checklists").update({ sub_section: newLabel }).in("id", ids);
+    if (ids.length) {
+      const { error } = await supabase.from("checklists").update({ sub_section: newLabel }).in("id", ids);
+      if (error) { showToast("error", "Couldn't rename section — try again."); setRenamingSection(null); return; }
+    }
     setItems((p) => ({ ...p, [catId]: (p[catId] || []).map((i) => i.sub_section === oldLabel ? { ...i, sub_section: newLabel } : i) }));
     setSections((p) => ({ ...p, [catId]: (p[catId] || []).map((s) => s === oldLabel ? newLabel : s) }));
     setRenamingSection(null);
@@ -454,7 +469,10 @@ function ChecklistsTab({ project, userRole }) {
   const deleteSection = async (catId, label) => {
     if (!window.confirm(`Remove section "${label}"? Items in it will become unsectioned.`)) return;
     const ids = (items[catId] || []).filter((i) => i.sub_section === label).map((i) => i.id);
-    if (ids.length) await supabase.from("checklists").update({ sub_section: null }).in("id", ids);
+    if (ids.length) {
+      const { error } = await supabase.from("checklists").update({ sub_section: null }).in("id", ids);
+      if (error) { showToast("error", "Couldn't delete section — try again."); return; }
+    }
     setItems((p) => ({ ...p, [catId]: (p[catId] || []).map((i) => i.sub_section === label ? { ...i, sub_section: null } : i) }));
     setSections((p) => ({ ...p, [catId]: (p[catId] || []).filter((s) => s !== label) }));
   };
@@ -472,7 +490,7 @@ function ChecklistsTab({ project, userRole }) {
       const { error } = await supabase.from("milestone_items")
         .upsert({ milestone_id: milestoneId, checklist_item_id: itemId, days_before: defDays ?? null }, { onConflict: "milestone_id,checklist_item_id" });
       if (error) {
-        console.error("milestone_items insert failed:", error);
+        showToast("error", "Couldn't assign milestone — try again.");
         // Revert optimistic update
         setItemMilestones((prev) => {
           const next = { ...prev };
@@ -487,7 +505,7 @@ function ChecklistsTab({ project, userRole }) {
       const { error } = await supabase.from("milestone_items").delete()
         .eq("milestone_id", milestoneId).eq("checklist_item_id", itemId);
       if (error) {
-        console.error("milestone_items delete failed:", error);
+        showToast("error", "Couldn't unassign milestone — try again.");
         // Revert optimistic update
         setItemMilestones((prev) => {
           const next = { ...prev };
@@ -524,7 +542,7 @@ function ChecklistsTab({ project, userRole }) {
         toChange.map((id) => ({ milestone_id: milestoneId, checklist_item_id: id, days_before: defDays ?? null })),
         { onConflict: "milestone_id,checklist_item_id" }
       );
-      if (error) console.error("bulk milestone insert failed:", error);
+      if (error) showToast("error", "Couldn't assign milestone to all selected items — try again.");
       else if (defDays != null) {
         setItemMilestoneDays((prev) => {
           const next = { ...prev };
@@ -535,7 +553,7 @@ function ChecklistsTab({ project, userRole }) {
     } else {
       const { error } = await supabase.from("milestone_items").delete()
         .eq("milestone_id", milestoneId).in("checklist_item_id", toChange);
-      if (error) console.error("bulk milestone delete failed:", error);
+      if (error) showToast("error", "Couldn't unassign milestone from all selected items — try again.");
     }
   };
 
@@ -561,12 +579,14 @@ function ChecklistsTab({ project, userRole }) {
     setSections((p) => ({ ...p, [catId]: arr }));
     const reordered = buildSortOrder(items[catId] || [], arr);
     setItems((p) => ({ ...p, [catId]: reordered }));
-    await Promise.all(reordered.map((item) => supabase.from("checklists").update({ sort_order: item.sort_order }).eq("id", item.id)));
+    const results = await Promise.all(reordered.map((item) => supabase.from("checklists").update({ sort_order: item.sort_order }).eq("id", item.id)));
+    if (results.some((r) => r.error)) showToast("error", "Section order saved locally, but not all items synced — reload to check.");
   };
 
   const assignItemToSection = async (catId, itemId, newSection) => {
     setItems((p) => ({ ...p, [catId]: (p[catId] || []).map((i) => i.id === itemId ? { ...i, sub_section: newSection } : i) }));
-    await supabase.from("checklists").update({ sub_section: newSection }).eq("id", itemId);
+    const { error } = await supabase.from("checklists").update({ sub_section: newSection }).eq("id", itemId);
+    if (error) showToast("error", "Couldn't move item to section — try again.");
   };
 
   const handleSectionDrop = (e, catId, label, toIdx) => {
@@ -1539,7 +1559,7 @@ function LevelsTab({ project }) {
 }
 
 // ── Team tab (assign org members to project) ────────────────────────────────
-function MembersTab({ project, session, userRole, org }) {
+function MembersTab({ project, session, userRole, org, showToast }) {
   const [members, setMembers] = useState([]);
   const [orgMembers, setOrgMembers] = useState([]);
   const [selectedUserId, setSelectedUserId] = useState("");
@@ -1608,11 +1628,13 @@ function MembersTab({ project, session, userRole, org }) {
 
   const updateRole = async (memberId, newRole) => {
     const { error } = await supabase.from("project_members").update({ role: newRole }).eq("id", memberId);
-    if (!error) setMembers((prev) => prev.map((m) => m.id === memberId ? { ...m, role: newRole } : m));
+    if (error) { showToast("error", "Couldn't update role — try again."); return; }
+    setMembers((prev) => prev.map((m) => m.id === memberId ? { ...m, role: newRole } : m));
   };
 
   const removeMember = async (memberId) => {
-    await supabase.from("project_members").delete().eq("id", memberId);
+    const { error } = await supabase.from("project_members").delete().eq("id", memberId);
+    if (error) { showToast("error", "Couldn't remove team member — try again."); return; }
     fetchAll();
   };
 
@@ -1785,6 +1807,7 @@ export default function ProjectSetupModal({ project, session, org, orgRole, user
   const isMobile = useIsMobile();
   const [tab, setTab] = useState("General");
   const [projectName, setProjectName] = useState(project.name);
+  const [toast, showToast] = useToast();
 
   const handleRenamed = (newName, newDesc) => {
     setProjectName(newName);
@@ -1793,6 +1816,7 @@ export default function ProjectSetupModal({ project, session, org, orgRole, user
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: isMobile ? "flex-end" : "center", justifyContent: "center", zIndex: 100 }}>
+      <Toast toast={toast} />
       <div style={{
         background: "var(--c-surface)",
         borderRadius: isMobile ? "16px 16px 0 0" : "16px",
@@ -1834,11 +1858,11 @@ export default function ProjectSetupModal({ project, session, org, orgRole, user
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: "auto", padding: isMobile ? "16px" : "24px" }}>
-          {tab === "General" && <GeneralTab project={{ ...project, name: projectName }} onProjectRenamed={handleRenamed} />}
-          {tab === "Team" && <MembersTab project={project} session={session} userRole={userRole} org={org} />}
-          {tab === "Checklists" && <ChecklistsTab project={project} userRole={userRole} />}
-          {tab === "Milestones" && <MilestonesTab project={project} />}
-          {tab === "Levels" && <LevelsTab project={project} />}
+          {tab === "General" && <GeneralTab project={{ ...project, name: projectName }} onProjectRenamed={handleRenamed} showToast={showToast} />}
+          {tab === "Team" && <MembersTab project={project} session={session} userRole={userRole} org={org} showToast={showToast} />}
+          {tab === "Checklists" && <ChecklistsTab project={project} userRole={userRole} showToast={showToast} />}
+          {tab === "Milestones" && <MilestonesTab project={project} showToast={showToast} />}
+          {tab === "Levels" && <LevelsTab project={project} showToast={showToast} />}
         </div>
       </div>
     </div>
