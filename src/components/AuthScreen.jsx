@@ -105,6 +105,12 @@ export default function AuthScreen() {
             {loading ? "Please wait..." : mode === "login" ? "Sign In" : "Create Account"}
           </button>
         </form>
+
+        <p style={{ margin: "24px 0 0", textAlign: "center", color: "var(--c-text-3)", fontSize: "10px", lineHeight: 1.6 }}>
+          © {new Date().getFullYear()} AG&E Structural Engenuity<br />
+          Developed by Gustavo Freire · Concept by Italo Rebouças<br />
+          QA review: Italo Rebouças, Murilo Santos
+        </p>
       </div>
     </div>
   );

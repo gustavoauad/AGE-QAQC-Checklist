@@ -155,6 +155,13 @@ export default function OrgShell({ session, org: initialOrg, orgRole, onSignOut,
                 <span style={{ flexShrink: 0 }}>↩</span>
                 {sidebarOpen && <span>Switch Org</span>}
               </button>
+              {sidebarOpen && (
+                <p style={{ margin: "12px 0 0", padding: "0 12px", color: "var(--c-text-3)", fontSize: "10px", lineHeight: 1.5 }}>
+                  © {new Date().getFullYear()} AG&E Structural Engenuity<br />
+                  Developed by Gustavo Freire · Concept by Italo Rebouças<br />
+                  QA review: Italo Rebouças, Murilo Santos
+                </p>
+              )}
             </div>
           </div>
         )}
