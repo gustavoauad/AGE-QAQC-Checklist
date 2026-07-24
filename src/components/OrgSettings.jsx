@@ -27,10 +27,10 @@ function OrgTab({ org, orgRole, onOrgRenamed }) {
 
   return (
     <div style={{ maxWidth: "480px" }}>
-      <h3 style={{ color: "var(--c-text)", margin: "0 0 20px", fontSize: "16px" }}>Organization Details</h3>
+      <h3 style={{ color: "var(--c-text)", margin: "0 0 20px", fontSize: "16px" }}>Team Details</h3>
       <form onSubmit={save}>
         <div style={{ marginBottom: "20px" }}>
-          <label style={labelStyle}>Organization Name</label>
+          <label style={labelStyle}>Team Name</label>
           <input
             type="text" value={name} onChange={(e) => setName(e.target.value)}
             disabled={orgRole !== "admin"} style={inputStyle}
@@ -45,7 +45,7 @@ function OrgTab({ org, orgRole, onOrgRenamed }) {
           </button>
         )}
         {orgRole !== "admin" && (
-          <p style={{ color: "var(--c-text-3)", fontSize: "13px", margin: 0 }}>Only admins can edit organization settings.</p>
+          <p style={{ color: "var(--c-text-3)", fontSize: "13px", margin: 0 }}>Only admins can edit team settings.</p>
         )}
       </form>
     </div>
@@ -95,7 +95,7 @@ function MembersTab({ org, session, orgRole }) {
       return;
     }
     if (members.find((m) => m.user_id === found.id)) {
-      setError("This user is already a member of this organization.");
+      setError("This user is already a member of this team.");
       setInviting(false);
       return;
     }
@@ -110,7 +110,7 @@ function MembersTab({ org, session, orgRole }) {
       user_id: found.id,
       type: "project_invite",
       title: `You've been added to "${org.name}"`,
-      body: `${inviterName} added you to the organization as ${inviteRole}.`,
+      body: `${inviterName} added you to the team as ${inviteRole}.`,
     });
 
     // Email (silent fail)
@@ -136,14 +136,14 @@ function MembersTab({ org, session, orgRole }) {
   };
 
   const removeMember = async (memberId) => {
-    if (!window.confirm("Remove this member from the organization?")) return;
+    if (!window.confirm("Remove this member from the team?")) return;
     await supabase.from("organization_members").delete().eq("id", memberId);
     setMembers((prev) => prev.filter((m) => m.id !== memberId));
   };
 
   return (
     <div>
-      <h3 style={{ color: "var(--c-text)", margin: "0 0 20px", fontSize: "16px" }}>Organization Members</h3>
+      <h3 style={{ color: "var(--c-text)", margin: "0 0 20px", fontSize: "16px" }}>Team Members</h3>
 
       {/* Invite form (admin only) */}
       {orgRole === "admin" && (
@@ -758,7 +758,7 @@ function ChecklistsTab({ org, orgRole }) {
           <p style={{ color: "var(--c-text-3)", fontSize: "13px", margin: 0 }}>
             {orgRole === "admin"
               ? "Customize categories, sections, and items. New projects inherit these defaults."
-              : "Default checklist configuration for this organization."}
+              : "Default checklist configuration for this team."}
           </p>
         </div>
         {orgRole === "admin" && (
@@ -1447,7 +1447,7 @@ function ChecklistsTab({ org, orgRole }) {
                 {/* Project list */}
                 <div style={{ maxHeight: "260px", overflowY: "auto", display: "grid", gap: "6px", marginBottom: "20px" }}>
                   {orgProjects.length === 0 ? (
-                    <p style={{ color: "var(--c-text-3)", fontSize: "13px", margin: 0 }}>No active projects in this organization.</p>
+                    <p style={{ color: "var(--c-text-3)", fontSize: "13px", margin: 0 }}>No active projects in this team.</p>
                   ) : orgProjects.map((p) => (
                     <label key={p.id} style={{
                       display: "flex", alignItems: "center", gap: "10px",
@@ -1487,11 +1487,11 @@ function ChecklistsTab({ org, orgRole }) {
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
-const TABS = ["Organization", "Members", "Checklists"];
+const TABS = ["Team", "Members", "Checklists"];
 
 export default function OrgSettings({ session, org, orgRole, onOrgRenamed }) {
   const isMobile = useIsMobile();
-  const [tab, setTab] = useState("Organization");
+  const [tab, setTab] = useState("Team");
 
   return (
     <div style={{ padding: isMobile ? "20px 16px" : "32px 28px", maxWidth: "760px", margin: "0 auto", fontFamily: "Manrope, sans-serif" }}>
@@ -1512,7 +1512,7 @@ export default function OrgSettings({ session, org, orgRole, onOrgRenamed }) {
         ))}
       </div>
 
-      {tab === "Organization" && <OrgTab org={org} orgRole={orgRole} onOrgRenamed={onOrgRenamed} />}
+      {tab === "Team" && <OrgTab org={org} orgRole={orgRole} onOrgRenamed={onOrgRenamed} />}
       {tab === "Members" && <MembersTab org={org} session={session} orgRole={orgRole} />}
       {tab === "Checklists" && <ChecklistsTab org={org} orgRole={orgRole} />}
     </div>

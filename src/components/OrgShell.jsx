@@ -84,7 +84,7 @@ export default function OrgShell({ session, org: initialOrg, orgRole, onSignOut,
               padding: "6px 12px", background: "transparent", border: "1px solid #334155",
               color: "var(--c-text-2)", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontFamily: "Manrope, sans-serif",
             }}>
-              Switch Org
+              Switch Team
             </button>
           )}
           <NotificationBell userId={session.user.id} onGoToProjects={() => setSection("projects")} />
@@ -145,7 +145,7 @@ export default function OrgShell({ session, org: initialOrg, orgRole, onSignOut,
 
             {/* Switch org at bottom of sidebar */}
             <div style={{ marginTop: "auto", paddingTop: "20px", borderTop: "1px solid #334155" }}>
-              <button onClick={onSwitchOrg} title={!sidebarOpen ? "Switch Org" : undefined} style={{
+              <button onClick={onSwitchOrg} title={!sidebarOpen ? "Switch Team" : undefined} style={{
                 display: "flex", alignItems: "center", gap: sidebarOpen ? "10px" : "0",
                 justifyContent: sidebarOpen ? "flex-start" : "center",
                 padding: "8px 12px", border: "none", borderRadius: "8px",
@@ -153,7 +153,7 @@ export default function OrgShell({ session, org: initialOrg, orgRole, onSignOut,
                 cursor: "pointer", fontSize: "13px", width: "100%", fontFamily: "Manrope, sans-serif",
               }}>
                 <span style={{ flexShrink: 0 }}>↩</span>
-                {sidebarOpen && <span>Switch Org</span>}
+                {sidebarOpen && <span>Switch Team</span>}
               </button>
               {sidebarOpen && (
                 <p style={{ margin: "12px 0 0", padding: "0 12px", color: "var(--c-text-3)", fontSize: "10px", lineHeight: 1.5 }}>

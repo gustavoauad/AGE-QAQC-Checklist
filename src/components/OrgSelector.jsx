@@ -45,7 +45,7 @@ export default function OrgSelector({ session, onSelectOrg, onSignOut }) {
         <div style={{ textAlign: "center", marginBottom: "40px" }}>
           <AgeLogo height={36} />
           <p style={{ color: "var(--c-text-3)", marginTop: "12px", fontSize: "14px", margin: "12px 0 0" }}>
-            Select or create an organization to continue
+            Select or create a team to continue
           </p>
         </div>
 
@@ -57,7 +57,7 @@ export default function OrgSelector({ session, onSelectOrg, onSignOut }) {
             {orgs.length > 0 && (
               <div style={{ marginBottom: "20px" }}>
                 <p style={{ color: "var(--c-text-3)", fontSize: "11px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.06em", margin: "0 0 10px" }}>
-                  Your Organizations
+                  Your Teams
                 </p>
                 <div style={{ display: "grid", gap: "8px" }}>
                   {orgs.map((org) => (
@@ -93,11 +93,11 @@ export default function OrgSelector({ session, onSelectOrg, onSignOut }) {
               }}
               onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--c-accent)"; e.currentTarget.style.color = "var(--c-accent-lt)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--c-border)"; e.currentTarget.style.color = "var(--c-text-3)"; }}>
-                + Create New Organization
+                + Create New Team
               </button>
             ) : (
               <form onSubmit={createOrg} style={{ background: "var(--c-surface)", border: "1px solid #334155", borderRadius: "10px", padding: "20px" }}>
-                <h3 style={{ color: "var(--c-text)", margin: "0 0 16px", fontSize: "15px", fontWeight: "700" }}>New Organization</h3>
+                <h3 style={{ color: "var(--c-text)", margin: "0 0 16px", fontSize: "15px", fontWeight: "700" }}>New Team</h3>
                 {error && (
                   <div style={{ background: "var(--c-err-bg)", border: "1px solid #ef4444", borderRadius: "6px", padding: "10px", marginBottom: "12px", color: "var(--c-err-text)", fontSize: "13px" }}>
                     {error}

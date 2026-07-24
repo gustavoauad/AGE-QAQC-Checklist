@@ -1641,7 +1641,7 @@ function MembersTab({ project, session, userRole, org, showToast }) {
   return (
     <div>
       <p style={{ color: "var(--c-text-2)", fontSize: "13px", marginTop: 0, marginBottom: "16px" }}>
-        Assign organization members to this project with a specific role. To add someone new, invite them to the organization first via Settings → Members.
+        Assign team members to this project with a specific role. To add someone new, invite them to the team first via Settings → Members.
       </p>
 
       {/* Add from org members */}
@@ -1683,7 +1683,7 @@ function MembersTab({ project, session, userRole, org, showToast }) {
         </form>
       ) : !loading && (
         <div style={{ background: "var(--c-bg)", borderRadius: "8px", padding: "14px 16px", marginBottom: "16px", border: "1px solid #334155", color: "var(--c-text-3)", fontSize: "13px" }}>
-          All organization members are already on this project.
+          All team members are already on this project.
         </div>
       )}
 
