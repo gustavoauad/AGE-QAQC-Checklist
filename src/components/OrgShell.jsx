@@ -18,6 +18,11 @@ export default function OrgShell({ session, org: initialOrg, orgRole, onSignOut,
   const [org, setOrg] = useState(initialOrg);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [setupFromChecklist, setSetupFromChecklist] = useState(false);
+  // Bumped whenever Project Setup closes so ChecklistView (which only fetches once on
+  // mount) reloads — otherwise milestone assignments, day offsets, item edits, sections,
+  // and category changes made in Setup stay invisible in the checklist until a full
+  // page reload.
+  const [setupCloseSignal, setSetupCloseSignal] = useState(0);
 
   const nav = [
     { id: "dashboard", icon: "📊", label: "Dashboard" },
@@ -36,6 +41,7 @@ export default function OrgShell({ session, org: initialOrg, orgRole, onSignOut,
           onSignOut={onSignOut}
           onGoToProjects={() => { setSelectedProject(null); setUserRole(null); setSection("projects"); }}
           onOpenSetup={(userRole === "project_manager" || userRole === "qaqc") ? () => setSetupFromChecklist(true) : null}
+          refreshSignal={setupCloseSignal}
         />
         {setupFromChecklist && (
           <ProjectSetupModal
@@ -44,7 +50,7 @@ export default function OrgShell({ session, org: initialOrg, orgRole, onSignOut,
             org={org}
             orgRole={orgRole}
             userRole={userRole}
-            onClose={() => setSetupFromChecklist(false)}
+            onClose={() => { setSetupFromChecklist(false); setSetupCloseSignal((n) => n + 1); }}
             onProjectRenamed={(newName, newDesc) =>
               setSelectedProject((p) => ({ ...p, name: newName, description: newDesc }))
             }

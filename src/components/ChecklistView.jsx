@@ -5,7 +5,7 @@ import { useIsMobile } from "../useIsMobile";
 import AgeLogo from "./AgeLogo";
 import NotificationBell from "./NotificationBell";
 
-export default function ChecklistView({ project, userRole, session, onBack, onSignOut, onGoToProjects, onOpenSetup }) {
+export default function ChecklistView({ project, userRole, session, onBack, onSignOut, onGoToProjects, onOpenSetup, refreshSignal }) {
   const isMobile = useIsMobile();
   const [checklists, setChecklists] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -55,6 +55,16 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
   const [togglingLevel, setTogglingLevel] = useState(null); // key of the level currently being toggled (milestone-scoped or flat)
 
   useEffect(() => { fetchAll(); }, []);
+
+  // Project Setup changes (milestone assignments, day offsets, item/section edits,
+  // category config, levels, dependencies…) are made in a sibling modal that this
+  // component has no other way of knowing closed — refetch everything once it does,
+  // instead of silently showing pre-edit data until the next full page reload.
+  const isFirstRefreshSignal = useRef(true);
+  useEffect(() => {
+    if (isFirstRefreshSignal.current) { isFirstRefreshSignal.current = false; return; }
+    fetchAll();
+  }, [refreshSignal]);
 
   // Real-time: update checklist items as other users make changes
   useEffect(() => {
