@@ -296,7 +296,7 @@ function ChecklistsTab({ org, orgRole }) {
   const [pushError, setPushError] = useState("");
   const [conflictNames, setConflictNames] = useState([]);
 
-  const openPushModal = async (cat) => openPushModalForCats([{ id: cat.id, label: getLabel(cat) }]);
+  const openPushModal = async (cat) => openPushModalForCats([{ id: cat.id, label: getLabel(cat), abbreviation: getAbbr(cat) }]);
 
   const openPushModalForCats = async (cats) => {
     setPushModal({ cats });
@@ -317,7 +317,7 @@ function ChecklistsTab({ org, orgRole }) {
   const startBulkPush = () => {
     const cats = allCats
       .filter((c) => bulkSelectedCats.has(c.id))
-      .map((c) => ({ id: c.id, label: getLabel(c) }));
+      .map((c) => ({ id: c.id, label: getLabel(c), abbreviation: getAbbr(c) }));
     if (!cats.length) return;
     setBulkPushMode(false);
     setBulkSelectedCats(new Set());
@@ -343,7 +343,7 @@ function ChecklistsTab({ org, orgRole }) {
   // all share the same conflict-resolution action once the user picks one.
   const executePush = async (action) => {
     setPushStatus("pushing"); setPushError("");
-    for (const { id: catId, label: catLabel } of pushModal.cats) {
+    for (const { id: catId, label: catLabel, abbreviation: catAbbr } of pushModal.cats) {
       const catItems = items[catId] !== undefined ? items[catId] : await initCategory(catId);
       const catSections = sections[catId] || [];
 
@@ -360,6 +360,7 @@ function ChecklistsTab({ org, orgRole }) {
         p_label:       catLabel,
         p_items:       sortedItems.map((i) => ({ item_id: i.item_id, item_text: i.item_text, section: i.section || null, help_text: i.help_text || null, days_before_milestone: i.days_before_milestone || null, is_level_based: !!i.is_level_based })),
         p_action:      action,
+        p_abbreviation: catAbbr || null,
       });
 
       if (error) { setPushError(`${catLabel}: ${error.message}`); setPushStatus("conflict"); return; }
