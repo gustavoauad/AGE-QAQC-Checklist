@@ -2,12 +2,14 @@ import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabase";
 import { CATEGORIES } from "../checklistTemplate";
 import { useIsMobile } from "../useIsMobile";
+import { useTheme } from "../ThemeContext";
 import AgeLogo from "./AgeLogo";
 import NotificationBell from "./NotificationBell";
 import Toast, { useToast } from "./Toast";
 
 export default function ChecklistView({ project, userRole, session, onBack, onSignOut, onGoToProjects, onOpenSetup, refreshSignal }) {
   const isMobile = useIsMobile();
+  const { theme, toggleTheme } = useTheme();
   const [toast, showToast] = useToast();
   const [checklists, setChecklists] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1700,6 +1702,13 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
               }}>⚙</button>
             )}
             <NotificationBell userId={session.user.id} onGoToProjects={onGoToProjects} />
+            <button onClick={toggleTheme} title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} style={{
+              padding: "6px 10px", background: "transparent", border: "1px solid var(--c-border)",
+              color: "var(--c-text-2)", borderRadius: "6px", cursor: "pointer", fontSize: "15px",
+              lineHeight: 1, fontFamily: "Manrope, sans-serif",
+            }}>
+              {theme === "dark" ? "☀" : "🌙"}
+            </button>
             <button onClick={onSignOut} style={{ padding: "6px 12px", background: "var(--c-err)", color: "white", border: "none", borderRadius: "6px", cursor: "pointer", fontSize: "13px" }}>
               {isMobile ? "↩" : "Sign Out"}
             </button>
