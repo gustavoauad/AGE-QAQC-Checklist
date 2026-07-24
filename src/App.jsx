@@ -42,33 +42,18 @@ export default function App() {
     }
   }, [session]);
 
+  // Redemption is server-side (SECURITY DEFINER) so the client never needs
+  // broad read access to the invite tokens table to validate one by value —
+  // the RPC checks expiry/existence and performs the join atomically.
   const processInviteToken = async (token, userId) => {
-    const { data: tokenData } = await supabase
-      .from("project_invite_tokens")
-      .select("*, project:projects(id, name)")
-      .eq("token", token)
-      .gte("expires_at", new Date().toISOString())
-      .single();
+    const { data, error } = await supabase.rpc("redeem_project_invite", { p_token: token });
+    if (error || !data) { showToast("error", "Invite link is invalid or has expired."); return; }
 
-    if (!tokenData) { showToast("error", "Invite link is invalid or has expired."); return; }
-
-    const { data: existing } = await supabase
-      .from("project_members").select("id")
-      .eq("project_id", tokenData.project_id).eq("user_id", userId).single();
-
-    if (existing) { showToast("info", `You're already a member of "${tokenData.project?.name}".`); return; }
-
-    await supabase.from("project_members").insert({
-      project_id: tokenData.project_id, user_id: userId,
-      role: tokenData.role, invited_by: tokenData.created_by,
-    });
-    await supabase.from("notifications").insert({
-      user_id: userId, project_id: tokenData.project_id,
-      type: "project_join",
-      title: `Joined "${tokenData.project?.name}"`,
-      body: `You joined as ${tokenData.role.replace(/_/g, " ")}. The project is now in your list.`,
-    });
-    showToast("success", `✅ You've joined "${tokenData.project?.name}"!`);
+    if (data.already_member) {
+      showToast("info", `You're already a member of "${data.project_name}".`);
+    } else {
+      showToast("success", `✅ You've joined "${data.project_name}"!`);
+    }
   };
 
   const showToast = (type, message) => {
