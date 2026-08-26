@@ -330,14 +330,22 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       }
       available.push(...undated);
       const effective = available.length > 0 && available.every((m) => completedMap[m.id]) ? "complete" : "in_progress";
-      if (effective !== item.status) reconciled.push({ item, effective });
+      if (effective !== item.status) reconciled.push({ item, effective, available, completedMap });
     });
     if (reconciled.length > 0) {
       const now = new Date().toISOString();
-      await Promise.all(reconciled.map(({ item, effective }) => {
+      await Promise.all(reconciled.map(({ item, effective, available, completedMap }) => {
+        // Preserve whoever/whenever is still on record for a currently-assigned milestone
+        // instead of wiping attribution just because the milestone SET changed (e.g. an
+        // unmet milestone was removed because it'll never be checked) — only an actual
+        // completion/un-completion of a milestone should erase who gets credited.
+        const doneEntries = available.map((m) => completedMap[m.id]).filter(Boolean);
+        const latest = doneEntries.length > 0
+          ? doneEntries.reduce((a, b) => (a.completedAt > b.completedAt ? a : b))
+          : null;
         const updates = effective === "complete"
-          ? { status: "complete", completed_by: null, completed_at: now, in_progress_by: null, in_progress_at: null }
-          : { status: "in_progress", completed_by: null, completed_at: null, in_progress_by: null, in_progress_at: null };
+          ? { status: "complete", completed_by: latest ? latest.completedBy : null, completed_at: latest ? latest.completedAt : now, in_progress_by: null, in_progress_at: null }
+          : { status: "in_progress", completed_by: null, completed_at: null, in_progress_by: latest ? latest.completedBy : null, in_progress_at: latest ? latest.completedAt : null };
         Object.assign(item, updates);
         return supabase.from("checklists").update(updates).eq("id", item.id);
       }));
