@@ -22,6 +22,7 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
   const [deletingId, setDeletingId] = useState(null);
   const [archivingId, setArchivingId] = useState(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
   useEffect(() => {
     fetchProjects();
@@ -40,7 +41,7 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
     // Projects user is directly assigned to (active)
     const { data: memberRows } = await supabase
       .from("project_members")
-      .select("role, project:projects(id, name, description, created_at, archived_at, organization_id)")
+      .select("role, project:projects(id, name, job_number, description, created_at, archived_at, organization_id)")
       .eq("user_id", session.user.id);
 
     const myProjects = (memberRows || [])
@@ -54,7 +55,7 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
     if (orgRole === "admin") {
       const { data: orgProjs } = await supabase
         .from("projects")
-        .select("id, name, description, created_at, archived_at")
+        .select("id, name, job_number, description, created_at, archived_at")
         .eq("organization_id", org.id)
         .is("archived_at", null)
         .order("created_at", { ascending: false });
@@ -98,6 +99,14 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
     ? allOrgProjects.map((p) => ({ project: p, role: getProjectRole(p.id) }))
     : projects;
 
+  // Client-side search over already-fetched projects, matching on name and/or job number
+  const searchTerm = searchQuery.trim().toLowerCase();
+  const filteredActiveList = searchTerm
+    ? activeList.filter(({ project }) =>
+        project.name?.toLowerCase().includes(searchTerm) ||
+        project.job_number?.toLowerCase().includes(searchTerm))
+    : activeList;
+
   return (
     <div style={{ padding: isMobile ? "20px 16px" : "32px 28px", maxWidth: "900px", margin: "0 auto", fontFamily: "Manrope, sans-serif" }}>
 
@@ -106,7 +115,8 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
         <div>
           <h2 style={{ color: "var(--c-text)", margin: 0, fontSize: isMobile ? "18px" : "22px", fontWeight: "700" }}>Projects</h2>
           <p style={{ color: "var(--c-text-2)", margin: "4px 0 0", fontSize: "13px" }}>
-            {activeList.length} project{activeList.length !== 1 ? "s" : ""}
+            {filteredActiveList.length} project{filteredActiveList.length !== 1 ? "s" : ""}
+            {searchTerm && filteredActiveList.length !== activeList.length ? ` of ${activeList.length}` : ""}
           </p>
         </div>
         {orgRole === "admin" && (
@@ -120,6 +130,23 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
         )}
       </div>
 
+      {/* Search — filters the active list below by name and/or job number */}
+      {!loading && activeList.length > 0 && (
+        <div style={{ marginBottom: "16px" }}>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by project name or job number…"
+            style={{
+              width: "100%", padding: "10px 14px", background: "var(--c-surface)",
+              border: "1px solid #334155", borderRadius: "8px", color: "var(--c-text)",
+              fontSize: "14px", boxSizing: "border-box", fontFamily: "Manrope, sans-serif",
+            }}
+          />
+        </div>
+      )}
+
       {/* Active projects */}
       {loading ? (
         <p style={{ color: "var(--c-text-2)", textAlign: "center", padding: "40px 0" }}>Loading projects...</p>
@@ -130,9 +157,13 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
             {orgRole === "admin" ? "Create a new project to get started." : "You haven't been assigned to any projects yet."}
           </p>
         </div>
+      ) : filteredActiveList.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "60px 0" }}>
+          <p style={{ color: "var(--c-text-2)", fontSize: "16px" }}>No projects match "{searchQuery.trim()}".</p>
+        </div>
       ) : (
         <div style={{ display: "grid", gap: "12px", marginBottom: "32px" }}>
-          {activeList.map(({ role, project }) => (
+          {filteredActiveList.map(({ role, project }) => (
             <div
               key={project.id}
               onClick={() => role && onSelectProject(project, role)}
@@ -149,6 +180,11 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
                   <h3 style={{ color: "var(--c-text)", margin: "0 0 4px", fontSize: isMobile ? "15px" : "17px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {project.name}
                   </h3>
+                  {project.job_number && (
+                    <p style={{ color: "var(--c-text-3)", margin: "0 0 6px", fontSize: "12px", fontFamily: "monospace" }}>
+                      Job # {project.job_number}
+                    </p>
+                  )}
                   {project.description && (
                     <p style={{ color: "var(--c-text-2)", margin: "0 0 6px", fontSize: "13px" }}>{project.description}</p>
                   )}
@@ -264,9 +300,9 @@ export default function ProjectsDashboard({ session, org, orgRole, onSelectProje
           orgRole={orgRole}
           userRole={setupProject.role}
           onClose={() => setSetupProject(null)}
-          onProjectRenamed={(newName, newDesc) => {
+          onProjectRenamed={(newName, newDesc, newJobNumber) => {
             fetchProjects();
-            setSetupProject((prev) => ({ ...prev, project: { ...prev.project, name: newName, description: newDesc } }));
+            setSetupProject((prev) => ({ ...prev, project: { ...prev.project, name: newName, description: newDesc, job_number: newJobNumber } }));
           }}
         />
       )}

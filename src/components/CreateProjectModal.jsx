@@ -15,6 +15,7 @@ CHECKLIST_TEMPLATE.forEach((t) => { TMPL_META[t.item_id] = { sub_section: t.sub_
 
 export default function CreateProjectModal({ onClose, onCreated, userId, org }) {
   const [name, setName] = useState("");
+  const [jobNumber, setJobNumber] = useState("");
   const [description, setDescription] = useState("");
   const [useTemplate, setUseTemplate] = useState(false);
   const [templateProjectId, setTemplateProjectId] = useState("");
@@ -198,7 +199,7 @@ export default function CreateProjectModal({ onClose, onCreated, userId, org }) 
     // Step 1 – create the project record
     const { data: project, error: projError } = await supabase
       .from("projects")
-      .insert({ name, description, created_by: userId, organization_id: org?.id || null })
+      .insert({ name, job_number: jobNumber.trim() || null, description, created_by: userId, organization_id: org?.id || null })
       .select().single();
     if (projError) { setError(projError.message); setLoading(false); setProgressPct(0); return; }
 
@@ -292,6 +293,12 @@ export default function CreateProjectModal({ onClose, onCreated, userId, org }) 
             <label style={labelStyle}>Project Name *</label>
             <input type="text" value={name} onChange={(e) => setName(e.target.value)} required
               placeholder="e.g. Office Building QC" style={inputStyle} disabled={loading} />
+          </div>
+
+          <div style={{ marginBottom: "16px" }}>
+            <label style={labelStyle}>Job Number</label>
+            <input type="text" value={jobNumber} onChange={(e) => setJobNumber(e.target.value)}
+              placeholder="e.g. 24-1057" style={inputStyle} disabled={loading} />
           </div>
 
           <div style={{ marginBottom: "20px" }}>

@@ -1725,6 +1725,7 @@ function MembersTab({ project, session, userRole, org, showToast }) {
 // ── General tab ────────────────────────────────────────────────────────────
 function GeneralTab({ project, onProjectRenamed }) {
   const [name, setName] = useState(project.name);
+  const [jobNumber, setJobNumber] = useState(project.job_number || "");
   const [description, setDescription] = useState(project.description || "");
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -1738,13 +1739,13 @@ function GeneralTab({ project, onProjectRenamed }) {
     setSuccess(false);
     const { error: err } = await supabase
       .from("projects")
-      .update({ name: name.trim(), description: description.trim() })
+      .update({ name: name.trim(), job_number: jobNumber.trim() || null, description: description.trim() })
       .eq("id", project.id);
     if (err) {
       setError("Could not update project: " + err.message);
     } else {
       setSuccess(true);
-      onProjectRenamed(name.trim(), description.trim());
+      onProjectRenamed(name.trim(), description.trim(), jobNumber.trim());
       setTimeout(() => setSuccess(false), 3000);
     }
     setSaving(false);
@@ -1774,6 +1775,15 @@ function GeneralTab({ project, onProjectRenamed }) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
+            style={inputStyle}
+          />
+        </div>
+        <div style={{ marginBottom: "16px" }}>
+          <label style={labelStyle}>Job Number</label>
+          <input
+            value={jobNumber}
+            onChange={(e) => setJobNumber(e.target.value)}
+            placeholder="e.g. 24-1057"
             style={inputStyle}
           />
         </div>
@@ -1809,9 +1819,9 @@ export default function ProjectSetupModal({ project, session, org, orgRole, user
   const [projectName, setProjectName] = useState(project.name);
   const [toast, showToast] = useToast();
 
-  const handleRenamed = (newName, newDesc) => {
+  const handleRenamed = (newName, newDesc, newJobNumber) => {
     setProjectName(newName);
-    if (onProjectRenamed) onProjectRenamed(newName, newDesc);
+    if (onProjectRenamed) onProjectRenamed(newName, newDesc, newJobNumber);
   };
 
   return (
