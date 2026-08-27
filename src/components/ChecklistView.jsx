@@ -7,6 +7,24 @@ import AgeLogo from "./AgeLogo";
 import NotificationBell from "./NotificationBell";
 import Toast, { useToast } from "./Toast";
 
+// The "active" milestone(s) for an item as of `today`: whichever single dated milestone
+// is currently in its window (the earliest one whose date hasn't passed yet, or the final
+// one once every date has passed — terminal, since there's no later one to roll into),
+// plus any undated milestones (no date to roll past, so they're always active). Only this
+// set gates the item's overall status — an earlier milestone whose date has already
+// passed stops counting toward "is this item done right now" the moment a later one
+// becomes current, even if it was never completed; its own record (done or not, by whom)
+// stays exactly as-is in milestone_items, untouched by this.
+const computeActiveMilestoneIds = (assignedIds, milestoneList, today) => {
+  const assignedMs = assignedIds.map((id) => milestoneList.find((m) => m.id === id)).filter(Boolean);
+  const dated = assignedMs.filter((m) => m.date).sort((a, b) => a.date.localeCompare(b.date));
+  const undated = assignedMs.filter((m) => !m.date);
+  const currentDated = dated.find((m) => today <= new Date(m.date + "T00:00:00")) || dated[dated.length - 1] || null;
+  const active = currentDated ? [currentDated] : [];
+  active.push(...undated);
+  return active.map((m) => m.id);
+};
+
 export default function ChecklistView({ project, userRole, session, onBack, onSignOut, onGoToProjects, onOpenSetup, refreshSignal }) {
   const isMobile = useIsMobile();
   const { theme, toggleTheme } = useTheme();
@@ -304,48 +322,48 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     }
 
     // Reconcile milestone-driven status: once a check has entered the milestone flow
-    // (complete/in_progress), its status must track whichever milestones are CURRENTLY
-    // assigned to it — milestones can be added, removed, or become newly due (a later
-    // milestone unlocks once the previous one's date has passed) after a user last set
-    // the status, so the stored value can go stale without this pass.
+    // (complete/in_progress), its status must track whichever milestone is CURRENTLY
+    // active for it — the item is only "complete" for as long as the active milestone
+    // (see computeActiveMilestoneIds) is done; once that milestone's date passes and a
+    // later one becomes active, the item automatically reopens to "pending" so it gets
+    // tracked toward the new milestone, regardless of whether the one that just rolled
+    // past was ever completed. A user last set the status against whichever milestone was
+    // active at the time, so the stored value can go stale purely from time passing,
+    // without this pass.
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const reconciled = [];
     items.forEach((item) => {
       if (item.status !== "complete" && item.status !== "in_progress") return;
       const assignedIds = imIdMap[item.id] || [];
       // Nothing to reconcile against for an item with no milestones assigned at all —
-      // without this, `available` below is always empty and `effective` always evaluates
-      // to "in_progress", silently downgrading every directly-completed, non-milestone
-      // item on each reload.
+      // without this, `activeIds` below is always empty and `effective` always evaluates
+      // to "pending", silently downgrading every directly-completed, non-milestone item
+      // on each reload.
       if (assignedIds.length === 0) return;
       const completedMap = imCompletedMap[item.id] || {};
-      const assignedMs = assignedIds.map((id) => ms.find((m) => m.id === id)).filter(Boolean);
-      const dated = assignedMs.filter((m) => m.date).sort((a, b) => a.date.localeCompare(b.date));
-      const undated = assignedMs.filter((m) => !m.date);
-      const available = [];
-      for (let i = 0; i < dated.length; i++) {
-        const prev = i > 0 ? dated[i - 1] : null;
-        if (prev && today < new Date(prev.date + "T00:00:00")) break;
-        available.push(dated[i]);
-      }
-      available.push(...undated);
-      const effective = available.length > 0 && available.every((m) => completedMap[m.id]) ? "complete" : "in_progress";
-      if (effective !== item.status) reconciled.push({ item, effective, available, completedMap });
+      const activeIds = computeActiveMilestoneIds(assignedIds, ms, today);
+      if (activeIds.length === 0) return;
+      const activeDone = activeIds.filter((id) => completedMap[id]);
+      const effective = activeDone.length === activeIds.length ? "complete" : activeDone.length > 0 ? "in_progress" : "pending";
+      if (effective !== item.status) reconciled.push({ item, effective, activeIds, completedMap });
     });
     if (reconciled.length > 0) {
       const now = new Date().toISOString();
-      await Promise.all(reconciled.map(({ item, effective, available, completedMap }) => {
-        // Preserve whoever/whenever is still on record for a currently-assigned milestone
-        // instead of wiping attribution just because the milestone SET changed (e.g. an
-        // unmet milestone was removed because it'll never be checked) — only an actual
-        // completion/un-completion of a milestone should erase who gets credited.
-        const doneEntries = available.map((m) => completedMap[m.id]).filter(Boolean);
+      await Promise.all(reconciled.map(({ item, effective, activeIds, completedMap }) => {
+        // Preserve whoever/whenever is still on record for the active milestone instead
+        // of wiping attribution just because the milestone SET or window changed (e.g. a
+        // not-yet-due milestone was removed, or time rolled the active milestone forward)
+        // — only an actual completion/un-completion of a milestone should erase who gets
+        // credited.
+        const doneEntries = activeIds.map((id) => completedMap[id]).filter(Boolean);
         const latest = doneEntries.length > 0
           ? doneEntries.reduce((a, b) => (a.completedAt > b.completedAt ? a : b))
           : null;
         const updates = effective === "complete"
           ? { status: "complete", completed_by: latest ? latest.completedBy : null, completed_at: latest ? latest.completedAt : now, in_progress_by: null, in_progress_at: null }
-          : { status: "in_progress", completed_by: null, completed_at: null, in_progress_by: latest ? latest.completedBy : null, in_progress_at: latest ? latest.completedAt : null };
+          : effective === "in_progress"
+          ? { status: "in_progress", completed_by: null, completed_at: null, in_progress_by: latest ? latest.completedBy : null, in_progress_at: latest ? latest.completedAt : null }
+          : { status: "pending", completed_by: null, completed_at: null, in_progress_by: null, in_progress_at: null };
         Object.assign(item, updates);
         return supabase.from("checklists").update(updates).eq("id", item.id);
       }));
@@ -921,11 +939,14 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
     setMilestoneCompletePopup({ item, selected });
   };
 
-  // Applies the popup's milestone selection: overall status is derived from how many of
-  // the assigned milestones are selected — all → complete, some → in_progress, none → pending.
+  // Applies the popup's milestone selection. Only the CURRENTLY ACTIVE milestone(s) —
+  // see computeActiveMilestoneIds — gate the item's overall status: complete once those
+  // are all selected, in_progress if only some are, pending otherwise. A selection can
+  // still include already-rolled-past milestones (fixing up historical completions), but
+  // those don't affect the item's current status — only the active one does, so the item
+  // won't show "complete" again just because an old, already-closed milestone was touched.
   const applyMilestoneCompletion = async (item, selectedIds) => {
     const assignedMsIds = itemMsIdMap[item.id] || [];
-    const allSelected = assignedMsIds.length > 0 && selectedIds.size === assignedMsIds.length;
 
     // Defense in depth: reject a selection that skips ahead of an earlier, not-yet-due
     // deadline, even though the popup's checkboxes already prevent this in normal use.
@@ -942,7 +963,13 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       }
     }
 
-    if (allSelected) {
+    const activeIds = computeActiveMilestoneIds(assignedMsIds, milestones, today);
+    const activeSelected = activeIds.filter((id) => selectedIds.has(id));
+    const newStatus = activeIds.length > 0 && activeSelected.length === activeIds.length
+      ? "complete"
+      : activeSelected.length > 0 ? "in_progress" : "pending";
+
+    if (newStatus === "complete") {
       const parentIds = [...(itemDeps[item.id] || new Set())];
       const incomplete = checklists.filter((c) => parentIds.includes(c.id) && c.status !== "complete" && c.status !== "na");
       if (incomplete.length > 0) {
@@ -954,7 +981,6 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
       }
     }
 
-    const newStatus = allSelected ? "complete" : selectedIds.size > 0 ? "in_progress" : "pending";
     setUpdating(item.id);
     const now = new Date().toISOString();
     const updates = {
@@ -1480,6 +1506,8 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
           {(() => {
             const dueInfos = getItemDueInfo(item.id);
             const msIds = itemMsIdMap[item.id] || [];
+            const todayForActive = new Date(); todayForActive.setHours(0, 0, 0, 0);
+            const activeMsIds = new Set(computeActiveMilestoneIds(msIds, milestones, todayForActive));
             const hasAny = (status === "complete" && completedByName) ||
               (status === "in_progress" && inProgressByName) ||
               msIds.length > 0 ||
@@ -1507,14 +1535,17 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                   const ms = milestones.find((m) => m.id === msId);
                   if (!ms) return null;
 
+                  const isActive = activeMsIds.has(msId);
+
                   if (info.completed) {
                     const doneStr = new Date(info.completed.completedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+                    const completedByMsName = info.completed.completedBy ? (profilesMap[info.completed.completedBy]?.full_name || "Unknown") : null;
                     return (
-                      <span key={msId} title={`Marked complete for ${ms.name} on ${doneStr}`}
+                      <span key={msId} title={`Marked complete for ${ms.name} on ${doneStr}${completedByMsName ? ` by ${completedByMsName}` : ""}`}
                         style={{ fontSize: "10px", fontWeight: "600", color: "var(--c-ok-text)", background: "var(--c-ok-bg)", border: "1px solid var(--c-ok)", borderRadius: "4px", padding: "2px 8px", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: "4px" }}>
                         <span>✓ {ms.name}</span>
                         <span style={{ opacity: 0.5 }}>·</span>
-                        <span>done {doneStr}</span>
+                        <span>{completedByMsName ? `${completedByMsName} · ${doneStr}` : `done ${doneStr}`}</span>
                       </span>
                     );
                   }
@@ -1540,8 +1571,9 @@ export default function ChecklistView({ project, userRole, session, onBack, onSi
                     : ` (${info.daysLeft >= 0 ? info.daysLeft + "d before" : Math.abs(info.daysLeft) + "d past"} ${ms.name} on ${ms.date})`;
                   return (
                     <span key={msId}
-                      title={`Due ${dueStr}${titleSuffix}`}
-                      style={{ fontSize: "10px", fontWeight: isPast || isSoon ? "600" : "400", color, background: bg, border: `1px solid ${border}`, borderRadius: "4px", padding: "2px 8px", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                      title={`Due ${dueStr}${titleSuffix}${isActive ? " — currently tracked milestone" : ""}`}
+                      style={{ fontSize: "10px", fontWeight: isPast || isSoon ? "600" : "400", color, background: bg, border: `1px solid ${isActive ? "var(--c-accent)" : border}`, borderRadius: "4px", padding: "2px 8px", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                      {isActive && <span title="Currently tracked milestone" style={{ color: "var(--c-accent)" }}>●</span>}
                       <span style={{ fontWeight: "700" }}>{isPast ? "⚠ " : isSoon ? "⏰ " : ""}{ms.name}</span>
                       <span style={{ opacity: 0.4 }}>·</span>
                       <span>{dueStr}{info.usesMsDateDefault && <span style={{ opacity: 0.6 }}>*</span>}</span>
