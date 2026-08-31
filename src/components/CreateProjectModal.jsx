@@ -73,6 +73,10 @@ export default function CreateProjectModal({ onClose, onCreated, userId, org }) 
     const { byCategory, initializedCats, cfg } = orgData;
     const customCatIds = cfg.filter((c) => c.is_custom).map((c) => c.category);
     const allCatIds = [...CATEGORIES.map((c) => c.id), ...customCatIds];
+    // A category an admin has explicitly turned OFF in Team Settings must never seed into
+    // a new project — even if nobody ever expanded it there, which otherwise leaves
+    // `initializedCats` blind to the disable and falls through to the hardcoded template.
+    const disabledCatIds = new Set(cfg.filter((c) => c.enabled === false).map((c) => c.category));
 
     const rows = [];
     let idx = 0;
@@ -90,8 +94,8 @@ export default function CreateProjectModal({ onClose, onCreated, userId, org }) 
             is_level_based: !!item.is_level_based,
           });
         });
-      } else if (!initializedCats.has(catId)) {
-        // Never configured in org settings → use original template
+      } else if (!initializedCats.has(catId) && !disabledCatIds.has(catId)) {
+        // Never configured in org settings, and not explicitly disabled → use original template
         CHECKLIST_TEMPLATE.filter((t) => t.category === catId).forEach((item) => {
           rows.push({
             project_id: projectId, item_id: item.item_id, category: catId,
@@ -101,7 +105,7 @@ export default function CreateProjectModal({ onClose, onCreated, userId, org }) 
           });
         });
       }
-      // Initialized but emptied → intentionally empty
+      // Initialized but emptied, or explicitly disabled → intentionally empty
     }
     return rows;
   };

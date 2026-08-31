@@ -159,7 +159,16 @@ function ChecklistsTab({ project, userRole, showToast }) {
   const customCats = Object.entries(config)
     .filter(([key, val]) => !standardCatIds.has(key) && val?.label)
     .map(([key, val]) => ({ id: key, label: val.label, isCustom: true }));
-  const allCats = [...CATEGORIES.map((c) => ({ ...c, isCustom: false })), ...customCats];
+  // A standard category that's been disabled AND has no items left is treated as fully
+  // removed from this project's checklist — not just temporarily toggled off — so it
+  // drops out of this list entirely instead of lingering as an empty "OFF" card. Mirrors
+  // the same rule in OrgSettings.jsx for the org-level default checklist list.
+  const allCats = [
+    ...CATEGORIES
+      .filter((c) => config[c.id]?.enabled !== false || (items[c.id]?.length ?? 0) > 0)
+      .map((c) => ({ ...c, isCustom: false })),
+    ...customCats,
+  ];
   const getLabel = (cat) => config[cat.id]?.label || cat.label;
   // Custom abbreviation overrides the auto-derived 4-char prefix; user's own input
   // is trusted verbatim (just sanitized/uppercased), not force-truncated to 4 chars.
